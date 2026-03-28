@@ -12,3 +12,16 @@ bun.lock
 .env.local
 .env.*
 !.env.example
+portfolio.json
+!portfolio.example.json
+
+reports/
+*_full.txt
+*_summary.txt
+*_report.txt
+portfolio_*.txt
+portfolio*.txt
+nvda_full.txt
+browse/test/fixtures/*.db
+~/
+docs/STREAK_DESIGN.md

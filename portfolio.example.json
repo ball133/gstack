@@ -1,0 +1,5 @@
+[
+  { "ticker": "NVDA", "quantity": 15, "costBasis": 144.0 },
+  { "ticker": "AAPL", "quantity": 10, "costBasis": 200.0 },
+  { "ticker": "00700", "quantity": 100, "costBasis": 394.8 }
+]

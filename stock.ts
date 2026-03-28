@@ -6,24 +6,269 @@
 
 import { join, dirname } from "path";
 import { homedir } from "os";
-import { appendFile } from "fs/promises";
+import { appendFile, writeFile } from "fs/promises";
 import { spawnSync } from "child_process";
 import { fileURLToPath } from "url";
+import fs from "fs";
+import util from "util";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const BROWSE_BIN = join(__dirname, "browse", "dist", "browse");
 
-const ticker = (process.argv[2] || "SPY").toUpperCase();
+type SentimentResult = { score: number; count: number };
 
-async function getNewsSentiment(symbol: string): Promise<{ score: number; count: number }> {
+type CliOptions = {
+  tickers: string[];
+  full: boolean;
+  noNews: boolean;
+  positionsSpec?: string;
+  outPath?: string;
+  mode?: "summary" | "full";
+  noOpen?: boolean;
+};
+
+type Position = {
+  rawTicker: string;
+  ticker: string;
+  quantity: number;
+  costBasis?: number;
+};
+
+function parseArgs(argv: string[]): CliOptions {
+  let full = false;
+  let noNews = false;
+  let tickers: string[] = [];
+  let positionsSpec: string | undefined;
+  let outPath: string | undefined;
+  let mode: "summary" | "full" | undefined;
+  let noOpen = false;
+
+  const args = [...argv];
+  while (args.length > 0) {
+    const a = args.shift()!;
+    if (a === "--full") {
+      full = true;
+      mode = "full";
+      continue;
+    }
+    if (a === "--mode") {
+      const v = (args.shift() || "").trim().toLowerCase();
+      if (v === "summary" || v === "full") {
+        mode = v;
+        full = v === "full";
+      }
+      continue;
+    }
+    if (a === "--no-news") {
+      noNews = true;
+      continue;
+    }
+    if (a === "--no-open") {
+      noOpen = true;
+      continue;
+    }
+    if (a === "--watch" || a === "--watchlist" || a === "-w") {
+      const list = args.shift() || "";
+      tickers = list.split(",").map((t) => t.trim()).filter(Boolean);
+      continue;
+    }
+    if (a === "--positions" || a === "--portfolio") {
+      positionsSpec = args.shift() || "";
+      continue;
+    }
+    if (a === "--out" || a === "--output") {
+      outPath = args.shift() || "";
+      continue;
+    }
+    tickers.push(a);
+  }
+
+  if (tickers.length === 1 && tickers[0].includes(",")) {
+    tickers = tickers[0].split(",").map((t) => t.trim()).filter(Boolean);
+  }
+
+  if (tickers.length === 0) tickers = ["SPY"];
+
+  return {
+    tickers: tickers.map((t) => t.toUpperCase()),
+    full,
+    noNews,
+    positionsSpec,
+    outPath,
+    mode,
+    noOpen,
+  };
+}
+
+function tableToText(data: any): string {
+  if (!Array.isArray(data) || data.length === 0) return "(empty)";
+  const rows = data.map((r: any) => (r && typeof r === "object" ? r : { Value: String(r) }));
+  const columns = Array.from(
+    rows.reduce((set: Set<string>, r: any) => {
+      Object.keys(r).forEach((k) => set.add(k));
+      return set;
+    }, new Set<string>()),
+  );
+
+  const values = rows.map((r: any) =>
+    columns.map((c) => (r[c] === undefined || r[c] === null ? "" : String(r[c]))),
+  );
+
+  const widths = columns.map((c, idx) =>
+    Math.max(
+      c.length,
+      ...values.map((v) => (v[idx] ? v[idx].length : 0)),
+    ),
+  );
+
+  const pad = (s: string, w: number) => s + " ".repeat(Math.max(0, w - s.length));
+  const sep = "+" + widths.map((w) => "-".repeat(w + 2)).join("+") + "+";
+  const header = "| " + columns.map((c, i) => pad(c, widths[i])).join(" | ") + " |";
+  const lines = [sep, header, sep];
+  for (const row of values) {
+    lines.push("| " + row.map((v, i) => pad(v, widths[i])).join(" | ") + " |");
+  }
+  lines.push(sep);
+  return lines.join("\n");
+}
+
+async function openFile(path: string) {
+  if (process.platform === "win32") {
+    spawnSync("cmd", ["/c", "start", "", path], { stdio: "ignore" });
+    return;
+  }
+  if (process.platform === "darwin") {
+    spawnSync("open", [path], { stdio: "ignore" });
+    return;
+  }
+  spawnSync("xdg-open", [path], { stdio: "ignore" });
+}
+
+function normalizeTicker(raw: string): string {
+  const t = raw.trim().toUpperCase();
+  if (!t) return t;
+  if (t.endsWith(".HK")) return t;
+
+  if (/^\d+$/.test(t)) {
+    const n = t.replace(/^0+/, "");
+    if (n.length > 0 && n.length <= 4) {
+      return n.padStart(4, "0") + ".HK";
+    }
+    return t + ".HK";
+  }
+
+  return t;
+}
+
+function getSector(ticker: string): string {
+  const t = ticker.toUpperCase();
+  const map: Record<string, string> = {
+    SPY: "ETF - US Equity",
+    TSM: "Semiconductors",
+    NVDA: "Semiconductors",
+    AAPL: "Technology - Hardware",
+    MSFT: "Technology - Software",
+    GOOGL: "Technology - Internet",
+    TCOM: "Consumer - Travel",
+    MSTR: "Crypto Proxy",
+    "0700.HK": "Technology - Internet",
+    "9988.HK": "Technology - E-commerce",
+    "1810.HK": "Technology - Hardware",
+    "7226.HK": "ETF/Derivative",
+  };
+  return map[t] || (t.endsWith(".HK") ? "HK - Other" : "Other");
+}
+
+function suggestAction(params: {
+  flags: string[];
+  bias: Bias;
+  weightPct: number;
+  rrRatio: number;
+  rsi: number;
+}): string {
+  const { flags, bias, weightPct, rrRatio, rsi } = params;
+  const conc = flags.includes("CONC>=20%");
+  const below20 = flags.includes("<20MA");
+  const below200 = flags.includes("<200MA");
+  const oversold = flags.includes("RSI<30");
+  const overbought = flags.includes("RSI>70");
+  const lowRR = flags.includes("LOW_RR");
+  const newsNA = flags.includes("NEWS_NA");
+
+  if (conc && (below20 || below200)) return "Reduce concentration; wait for trend reclaim";
+  if (bias === "Bearish" && conc) return "Reduce concentration / hedge";
+  if (lowRR && (below20 || below200)) return "Avoid adding; wait for better RR + reversal";
+  if (lowRR) return "Wait for better entry (RR)";
+  if (oversold && below200) return "Oversold in downtrend; add only on reversal";
+  if (oversold) return rrRatio >= 2 ? "Oversold; consider small scale-in (RR ok)" : "Oversold; wait (RR weak)";
+  if (overbought) return "Overbought; consider trim / tighten stop";
+  if (bias === "Bullish" && rrRatio >= 2 && weightPct < 20) return "Hold/add; use invalidation as stop";
+  if (bias === "Bullish") return "Hold; add only if RR improves";
+  if (bias === "Neutral" && rrRatio >= 2) return "Hold; watch breakout/confirm";
+  if (newsNA) return "Hold; ignore sentiment (no news data)";
+  return "Hold; monitor";
+}
+
+function parsePositionsSpec(spec: string): Position[] {
+  const s = spec.trim();
+  if (!s) return [];
+
+  if (fs.existsSync(s) && fs.statSync(s).isFile()) {
+    const raw = fs.readFileSync(s, "utf8").trim();
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed
+          .map((p: any) => ({
+            rawTicker: String(p.ticker ?? ""),
+            ticker: normalizeTicker(String(p.ticker ?? "")),
+            quantity: Number(p.quantity ?? 0),
+            costBasis: p.costBasis == null ? undefined : Number(p.costBasis),
+          }))
+          .filter((p: Position) => p.ticker && Number.isFinite(p.quantity) && p.quantity !== 0);
+      }
+    } catch {}
+    return parsePositionsSpec(raw);
+  }
+
+  return s
+    .split(",")
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .map((token) => {
+      const [left, costPart] = token.split("@");
+      const [tickerPart, qtyPart] = left.split(":");
+      const rawTicker = (tickerPart || "").trim();
+      const quantity = Number((qtyPart || "").trim());
+      const costBasisRaw = costPart == null ? undefined : Number(costPart.trim());
+      const costBasis = costBasisRaw == null || Number.isNaN(costBasisRaw) ? undefined : costBasisRaw;
+      return {
+        rawTicker,
+        ticker: normalizeTicker(rawTicker),
+        quantity: Number.isFinite(quantity) ? quantity : 0,
+        costBasis,
+      } satisfies Position;
+    })
+    .filter((p) => p.ticker && Number.isFinite(p.quantity) && p.quantity !== 0);
+}
+
+async function getNewsSentiment(symbol: string, enabled: boolean): Promise<SentimentResult> {
+  if (!enabled) return { score: 50, count: 0 };
   try {
     const url = `https://finance.yahoo.com/quote/${symbol}/news/`;
-    
-    // Use the browse binary to get text
-    spawnSync(BROWSE_BIN, ["goto", url]);
-    const result = spawnSync(BROWSE_BIN, ["text"]);
-    const text = result.stdout.toString();
+
+    const chainInput = JSON.stringify([
+      ["goto", url],
+      ["wait", "--load"],
+      ["text"],
+    ]);
+
+    const result = spawnSync(BROWSE_BIN, ["chain"], { input: chainInput, encoding: "utf8" });
+    const stdout = (result.stdout || "").toString();
+    const idx = stdout.indexOf("[text] ");
+    const text = idx >= 0 ? stdout.slice(idx + "[text] ".length) : "";
 
     // Simple keyword-based sentiment analysis
     const bullishWords = ["surge", "rally", "buy", "growth", "positive", "beat", "up", "bullish", "high"];
@@ -68,6 +313,7 @@ interface ChartData {
   lows: number[];
   volumes: number[];
   timestamps: number[];
+  currency?: string;
 }
 
 async function fetchHistoricalData(symbol: string, interval: string, range: string): Promise<ChartData> {
@@ -89,7 +335,7 @@ async function fetchHistoricalData(symbol: string, interval: string, range: stri
   const volumes = quote.volume.filter((p: any) => p !== null);
   const timestamps = result.timestamp;
   
-  return { prices, highs, lows, volumes, timestamps };
+  return { prices, highs, lows, volumes, timestamps, currency: result.meta?.currency };
 }
 
 // ─── Technical Analysis Helpers ─────────────────────────────────────
@@ -200,7 +446,66 @@ function calculatePivots(h: number, l: number, c: number) {
 
 // ─── Analysis Engine ───────────────────────────────────────────────
 
-async function runInstitutionalAnalysis(symbol: string) {
+type Bias = "Bullish" | "Neutral" | "Bearish";
+
+function computeBias(params: {
+  price: number;
+  d20ma: number;
+  d200ma: number;
+  macdHistogram: number;
+  obvTrend: string;
+  rsi: number;
+}): { bias: Bias; confidence: number } {
+  const above20 = params.price > params.d20ma;
+  const above200 = params.price > params.d200ma;
+  const macdBull = params.macdHistogram > 0;
+  const obvBull = params.obvTrend.includes("Accumulation");
+  const rsiOkBull = params.rsi >= 40 && params.rsi <= 70;
+
+  const macdBear = params.macdHistogram < 0;
+  const obvBear = params.obvTrend.includes("Distribution");
+  const rsiOkBear = params.rsi <= 60;
+
+  let confidence = 50;
+  if (above20) confidence += 10;
+  if (above200) confidence += 10;
+  if (macdBull) confidence += 10;
+  if (obvBull) confidence += 10;
+  if (rsiOkBull) confidence += 10;
+
+  if (!above20) confidence -= 10;
+  if (!above200) confidence -= 10;
+  if (macdBear) confidence -= 10;
+  if (obvBear) confidence -= 10;
+  if (!rsiOkBear) confidence -= 5;
+
+  confidence = Math.max(0, Math.min(100, confidence));
+
+  if (above20 && macdBull && obvBull && rsiOkBull) return { bias: "Bullish", confidence };
+  if (!above20 && macdBear && obvBear) return { bias: "Bearish", confidence };
+  return { bias: "Neutral", confidence };
+}
+
+function computeInvalidation(bias: Bias, levels: { d20ma: number; r1: number; s1: number }): number {
+  if (bias === "Bullish") return Math.min(levels.d20ma, levels.s1);
+  if (bias === "Bearish") return Math.max(levels.d20ma, levels.r1);
+  return levels.d20ma;
+}
+
+async function analyzeSymbol(symbol: string, options: CliOptions): Promise<{
+  ticker: string;
+  price: number;
+  bias: Bias;
+  confidence: number;
+  rrRatio: number;
+  sentimentScore: number;
+  sentimentCount: number;
+  invalidation: number;
+  d20ma: number;
+  d200ma: number;
+  currency: string;
+  rsi: number;
+}> {
   try {
     const tickerName = symbol === "SPY" ? "標普 500 (SPY)" : symbol;
     
@@ -248,13 +553,6 @@ async function runInstitutionalAnalysis(symbol: string) {
     const distToTarget = Math.abs(p + atr - p);
     const rrRatio = distToTarget / (distToSupport || 1);
 
-    // Conviction Logic
-    let conviction = 50;
-    if (p > d20MA) conviction += 10;
-    if (histogram > 0) conviction += 10;
-    if (rsi < 70 && rsi > 50) conviction += 10;
-    if (p > prevP) conviction += 10;
-
     // Probability Logic
     const isUp = p > d20MA;
     const upProb = isUp ? 100 : 0;
@@ -265,67 +563,384 @@ async function runInstitutionalAnalysis(symbol: string) {
 
     // Step 5: Log Sentiment Phase
     await logToAnalytics("news-sentiment-analysis", symbol);
-    const sentiment = await getNewsSentiment(symbol);
+    const sentiment = await getNewsSentiment(symbol, !options.noNews);
+
+    const obvTrend = obv.trend;
+    const { bias, confidence } = computeBias({
+      price: p,
+      d20ma: d20MA,
+      d200ma: d200MA,
+      macdHistogram: histogram,
+      obvTrend,
+      rsi,
+    });
+
+    const invalidation = computeInvalidation(bias, { d20ma: d20MA, r1: pivots.r1, s1: pivots.s1 });
 
     const color = (c: number) => c > 70 ? "\x1b[32m" : c < 40 ? "\x1b[31m" : "\x1b[33m";
     const reset = "\x1b[0m";
 
-    // ─── 1. ORIGINAL SPY ANALYSIS ───
-    console.log(`\n📉 ${symbol} 分析`);
-    console.log(`📡 正在分析${tickerName} 綜合日線與 4 小時線數據，請稍候...`);
-    
-    // Display Sentiment
-    const sentColor = sentiment.score >= 60 ? "\x1b[32m" : sentiment.score <= 40 ? "\x1b[31m" : "\x1b[33m";
-    console.log(`📰 新聞輿情分析: ${sentColor}${sentiment.score}% Bullish${reset} (基於 ${sentiment.count} 個關鍵字)`);
+    const shouldPrintFull = options.mode === "full";
+    if (shouldPrintFull) {
+      console.log(`\n🎯 TRADING BRIEF: ${symbol}`);
+      console.log(`Bias: ${bias} | Confidence: ${confidence}% | Invalidation: $${invalidation.toFixed(2)}`);
 
-    console.log(`\n📊 ${symbol} (S&P 500) 自訂大盤特化分析 📊`);
-    console.log(`最新價格: $${p.toFixed(2)}`);
-    console.log(`\n📈 今日上漲機率: ${upProb}%`);
-    console.log(`📉 今日下跌機率: ${downProb}%`);
-    console.log(`\n🧱 上方壓力位 (Resistance)`);
-    console.log(`  └ 4H 20MA: $${h20MA.toFixed(2)}`);
-    console.log(`  └ 日線 20MA: $${d20MA.toFixed(2)}`);
-    console.log(`  └ 4H 50MA: $${h50MA.toFixed(2)}`);
-    console.log(`\n🛡️ 下方支撐位 (Support)`);
-    console.log(`  └ 日線 布林帶下軌: $${dBB_Lower.toFixed(2)}`);
-    console.log(`  └ 4H 布林帶下軌: $${hBB_Lower.toFixed(2)}`);
-    console.log(`  └ 日線 200MA: $${d200MA.toFixed(2)}`);
+      console.log(`\n📉 ${symbol} 分析`);
+      console.log(`📡 正在分析${tickerName} 綜合日線與 4 小時線數據，請稍候...`);
 
-    // ─── 2. GOLDMAN SACHS SECURITY ANALYSIS ───
-    console.log(`\n🏢 GOLDMAN SACHS SECURITY ANALYSIS: ${symbol} 🏢`);
-    console.log(`================================================`);
-    console.log(`Current Quote: $${p.toFixed(2)} | RSI(14): ${rsi.toFixed(1)}`);
-    console.log(`Trend Conviction: ${color(conviction)}${conviction}%${reset}`);
-    console.log(`\n📉 MOMENTUM (MACD)`);
-    console.log(`  └ Histogram: ${histogram > 0 ? "+" : ""}${histogram.toFixed(2)} (${histogram > 0 ? "Bullish" : "Bearish"})`);
-    console.log(`\n🎯 VOLATILITY PROJECTIONS (1-ATR)`);
-    console.log(`  └ Bullish Target: $${(p + atr).toFixed(2)}`);
-    console.log(`  └ Bearish Support: $${(p - atr).toFixed(2)}`);
+      if (options.noNews) {
+        console.log(`📰 新聞輿情分析: -`);
+      } else if (sentiment.count === 0) {
+        console.log(`📰 新聞輿情分析: N/A`);
+      } else {
+        const sentColor = sentiment.score >= 60 ? "\x1b[32m" : sentiment.score <= 40 ? "\x1b[31m" : "\x1b[33m";
+        console.log(`📰 新聞輿情分析: ${sentColor}${sentiment.score}% Bullish${reset} (基於 ${sentiment.count} 個關鍵字)`);
+      }
 
-    // ─── 3. INSTITUTIONAL RISK REPORT ───
-    console.log(`\n🛡️ INSTITUTIONAL RISK REPORT: ${symbol} 🛡️`);
-    console.log(`================================================`);
-    console.log(`Price: $${p.toFixed(2)} | RSI: ${rsi.toFixed(1)} (${rsi > 70 ? "Overbought" : rsi < 30 ? "Oversold" : "Neutral"})`);
-    console.log(`\n🌊 CAPITAL FLOW (OBV)`);
-    console.log(`  └ Money Flow: ${obv.trend}`);
-    console.log(`\n🏛️ HFT PIVOT LEVELS (Floor)`);
-    console.log(`  └ Resistance (R1): $${pivots.r1.toFixed(2)}`);
-    console.log(`  └ Central Pivot (P): $${pivots.p.toFixed(2)}`);
-    console.log(`  └ Support (S1):    $${pivots.s1.toFixed(2)}`);
-    console.log(`\n📊 ALPHA RISK MODEL`);
-    console.log(`  └ Risk/Reward:    ${rrRatio.toFixed(2)}x ${rrRatio > 2 ? "✅ ATTRACTIVE" : "⚠️ UNFAVORABLE"}`);
-    console.log(`\n🧱 LONG-TERM STRUCTURE`);
-    console.log(`  └ Daily 200MA: $${d200MA.toFixed(2)} (${p > d200MA ? "Bullish Phase" : "Bearish Phase"})`);
-    console.log(`  └ Daily 20MA:  $${d20MA.toFixed(2)} (${p > d20MA ? "Short-term Strength" : "Short-term Weakness"})`);
-    console.log(`================================================\n`);
+      console.log(`\n📊 ${symbol} (S&P 500) 自訂大盤特化分析 📊`);
+      console.log(`最新價格: $${p.toFixed(2)}`);
+      console.log(`\n📈 今日上漲機率: ${upProb}%`);
+      console.log(`📉 今日下跌機率: ${downProb}%`);
+      console.log(`\n🧱 上方壓力位 (Resistance)`);
+      console.log(`  └ 4H 20MA: $${h20MA.toFixed(2)}`);
+      console.log(`  └ 日線 20MA: $${d20MA.toFixed(2)}`);
+      console.log(`  └ 4H 50MA: $${h50MA.toFixed(2)}`);
+      console.log(`\n🛡️ 下方支撐位 (Support)`);
+      console.log(`  └ 日線 布林帶下軌: $${dBB_Lower.toFixed(2)}`);
+      console.log(`  └ 4H 布林帶下軌: $${hBB_Lower.toFixed(2)}`);
+      console.log(`  └ 日線 200MA: $${d200MA.toFixed(2)}`);
+
+      console.log(`\n🏢 GOLDMAN SACHS SECURITY ANALYSIS: ${symbol} 🏢`);
+      console.log(`================================================`);
+      console.log(`Current Quote: $${p.toFixed(2)} | RSI(14): ${rsi.toFixed(1)}`);
+      console.log(`Trend Conviction: ${color(confidence)}${confidence}%${reset}`);
+      console.log(`\n📉 MOMENTUM (MACD)`);
+      console.log(`  └ Histogram: ${histogram > 0 ? "+" : ""}${histogram.toFixed(2)} (${histogram > 0 ? "Bullish" : "Bearish"})`);
+      console.log(`\n🎯 VOLATILITY PROJECTIONS (1-ATR)`);
+      console.log(`  └ Bullish Target: $${(p + atr).toFixed(2)}`);
+      console.log(`  └ Bearish Support: $${(p - atr).toFixed(2)}`);
+
+      console.log(`\n🛡️ INSTITUTIONAL RISK REPORT: ${symbol} 🛡️`);
+      console.log(`================================================`);
+      console.log(`Price: $${p.toFixed(2)} | RSI: ${rsi.toFixed(1)} (${rsi > 70 ? "Overbought" : rsi < 30 ? "Oversold" : "Neutral"})`);
+      console.log(`\n🌊 CAPITAL FLOW (OBV)`);
+      console.log(`  └ Money Flow: ${obv.trend}`);
+      console.log(`\n🏛️ HFT PIVOT LEVELS (Floor)`);
+      console.log(`  └ Resistance (R1): $${pivots.r1.toFixed(2)}`);
+      console.log(`  └ Central Pivot (P): $${pivots.p.toFixed(2)}`);
+      console.log(`  └ Support (S1):    $${pivots.s1.toFixed(2)}`);
+      console.log(`\n📊 ALPHA RISK MODEL`);
+      console.log(`  └ Risk/Reward:    ${rrRatio.toFixed(2)}x ${rrRatio > 2 ? "✅ ATTRACTIVE" : "⚠️ UNFAVORABLE"}`);
+      console.log(`\n🧱 LONG-TERM STRUCTURE`);
+      console.log(`  └ Daily 200MA: $${d200MA.toFixed(2)} (${p > d200MA ? "Bullish Phase" : "Bearish Phase"})`);
+      console.log(`  └ Daily 20MA:  $${d20MA.toFixed(2)} (${p > d20MA ? "Short-term Strength" : "Short-term Weakness"})`);
+      console.log(`================================================\n`);
+    } else if (!options.positionsSpec && options.tickers.length === 1) {
+      const sentimentLabel = options.noNews ? "-" : sentiment.count === 0 ? "N/A" : `${sentiment.score}%`;
+      console.log(`\n🎯 TRADING BRIEF: ${symbol}`);
+      console.log(
+        `Bias: ${bias} | Confidence: ${confidence}% | Invalidation: $${invalidation.toFixed(2)} | Sentiment: ${sentimentLabel}`,
+      );
+      console.log(
+        `Price: $${p.toFixed(2)} | RR: ${rrRatio.toFixed(2)} | Daily20MA: $${d20MA.toFixed(2)} | Daily200MA: $${d200MA.toFixed(2)}`,
+      );
+    }
 
     // Log the "Success" to analytics
     await logToAnalytics("qa", symbol);
     await logToAnalytics("ship", symbol);
 
+    return {
+      ticker: symbol,
+      price: p,
+      bias,
+      confidence,
+      rrRatio,
+      sentimentScore: sentiment.score,
+      sentimentCount: sentiment.count,
+      invalidation,
+      d20ma: d20MA,
+      d200ma: d200MA,
+      currency: daily.currency || "USD",
+      rsi,
+    };
   } catch (e: any) {
     console.error(`\n❌ Analysis Failed: ${e.message}\n`);
+    return {
+      ticker: symbol,
+      price: 0,
+      bias: "Neutral",
+      confidence: 0,
+      rrRatio: 0,
+      sentimentScore: 50,
+      sentimentCount: 0,
+      invalidation: 0,
+      d20ma: 0,
+      d200ma: 0,
+      currency: "USD",
+      rsi: 50,
+    };
   }
 }
 
-runInstitutionalAnalysis(ticker);
+async function main() {
+  const parsed = parseArgs(process.argv.slice(2));
+  const mode = parsed.mode ?? (parsed.positionsSpec || parsed.tickers.length > 1 ? "summary" : "full");
+  const options: CliOptions = { ...parsed, mode, full: mode === "full" };
+  const outLines: string[] = [];
+  const outPath = options.outPath && options.outPath.trim() ? options.outPath.trim() : undefined;
+
+  const originalLog = console.log;
+  const originalTable = console.table;
+  const originalError = console.error;
+
+  if (outPath) {
+    console.log = (...args: any[]) => {
+      outLines.push(util.format(...args));
+      originalLog(...args);
+    };
+    console.error = (...args: any[]) => {
+      outLines.push(util.format(...args));
+      originalError(...args);
+    };
+    console.table = (tabularData: any, properties?: string[]) => {
+      try {
+        if (Array.isArray(tabularData)) {
+          const rows = properties
+            ? tabularData.map((r) => {
+                const o: Record<string, any> = {};
+                for (const p of properties) o[p] = r?.[p];
+                return o;
+              })
+            : tabularData;
+          outLines.push(tableToText(rows));
+        } else {
+          outLines.push(tableToText([{ Value: util.format(tabularData) }]));
+        }
+      } catch {
+        outLines.push(util.format(tabularData));
+      }
+      originalTable(tabularData as any, properties as any);
+    };
+  }
+
+  try {
+  if (options.positionsSpec) {
+    const positions = parsePositionsSpec(options.positionsSpec);
+    if (positions.length === 0) {
+      console.log("No positions found. Example:");
+      console.log('  bun run stock.ts --positions "NVDA:15@167.52,AAPL:10@200,0700:100@493.4"');
+      return;
+    }
+
+    const rows = [];
+    for (const p of positions) {
+      const r = await analyzeSymbol(p.ticker, options);
+      const marketValue = r.price * p.quantity;
+      const costValue = p.costBasis == null ? undefined : p.costBasis * p.quantity;
+      const pnl = costValue == null ? undefined : marketValue - costValue;
+      const pnlPct = costValue == null || costValue === 0 ? undefined : (pnl! / costValue) * 100;
+      rows.push({
+        ...r,
+        rawTicker: p.rawTicker,
+        quantity: p.quantity,
+        marketValue,
+        costValue,
+        pnl,
+        pnlPct,
+      });
+    }
+
+    const totalsByCcy = new Map<string, number>();
+    for (const r of rows) {
+      totalsByCcy.set(r.currency, (totalsByCcy.get(r.currency) || 0) + r.marketValue);
+    }
+
+    console.log("\n📌 PORTFOLIO SUMMARY (by currency, not FX-converted)");
+    console.table(
+      Array.from(totalsByCcy.entries())
+        .sort((a, b) => b[1] - a[1])
+        .map(([Currency, MarketValue]) => ({ Currency, MarketValue: MarketValue.toFixed(2) })),
+    );
+
+    const biasCountsByCcy = new Map<string, { Bullish: number; Neutral: number; Bearish: number }>();
+    const sectorMvByCcy = new Map<string, Map<string, number>>();
+    for (const r of rows) {
+      const bc = biasCountsByCcy.get(r.currency) || { Bullish: 0, Neutral: 0, Bearish: 0 };
+      bc[r.bias] += 1;
+      biasCountsByCcy.set(r.currency, bc);
+
+      const sector = getSector(r.ticker);
+      const sm = sectorMvByCcy.get(r.currency) || new Map<string, number>();
+      sm.set(sector, (sm.get(sector) || 0) + r.marketValue);
+      sectorMvByCcy.set(r.currency, sm);
+    }
+
+    console.log("\n🧭 PORTFOLIO REGIME (counts by currency)");
+    console.table(
+      Array.from(biasCountsByCcy.entries()).map(([Currency, c]) => ({
+        Currency,
+        Bullish: c.Bullish,
+        Neutral: c.Neutral,
+        Bearish: c.Bearish,
+      })),
+    );
+
+    console.log("\n🏷️ SECTOR EXPOSURE (top by currency)");
+    const sectorRows: Array<{ Currency: string; Sector: string; MarketValue: string; Weight: string }> = [];
+    for (const [ccy, sm] of sectorMvByCcy.entries()) {
+      const total = totalsByCcy.get(ccy) || 1;
+      const top = Array.from(sm.entries()).sort((a, b) => b[1] - a[1]).slice(0, 6);
+      for (const [sector, mv] of top) {
+        sectorRows.push({
+          Currency: ccy,
+          Sector: sector,
+          MarketValue: mv.toFixed(2),
+          Weight: `${((mv / total) * 100).toFixed(1)}%`,
+        });
+      }
+    }
+    console.table(sectorRows);
+
+    const enriched = rows.map((r) => {
+      const total = totalsByCcy.get(r.currency) || 1;
+      const weightPct = (r.marketValue / total) * 100;
+
+      const flags: string[] = [];
+      if (weightPct >= 20) flags.push("CONC>=20%");
+      if (r.price > 0 && r.price < r.d20ma) flags.push("<20MA");
+      if (r.price > 0 && r.price < r.d200ma) flags.push("<200MA");
+      if (r.rsi < 30) flags.push("RSI<30");
+      if (r.rsi > 70) flags.push("RSI>70");
+      if (r.rrRatio < 1.5) flags.push("LOW_RR");
+      if (!options.noNews && r.sentimentCount === 0) flags.push("NEWS_NA");
+
+      const sentimentLabel = options.noNews ? "-" : r.sentimentCount === 0 ? "N/A" : `${r.sentimentScore}%`;
+
+      const biasFactor = r.bias === "Bullish" ? 20 : r.bias === "Bearish" ? 10 : 15;
+      const opportunityScore =
+        biasFactor + r.confidence + Math.min(50, r.rrRatio * 10) + Math.round(r.sentimentScore / 10);
+
+      const riskMultiplier =
+        1 +
+        (flags.includes("<200MA") ? 0.6 : 0) +
+        (flags.includes("<20MA") ? 0.3 : 0) +
+        (flags.includes("RSI<30") || flags.includes("RSI>70") ? 0.15 : 0) +
+        (flags.includes("LOW_RR") ? 0.15 : 0) +
+        (flags.includes("CONC>=20%") ? 0.25 : 0);
+      const riskScore = weightPct * riskMultiplier;
+
+      return {
+        ...r,
+        weightPct,
+        flags,
+        sentimentLabel,
+        opportunityScore,
+        riskScore,
+      };
+    });
+
+    console.log("\n🧾 PORTFOLIO VERDICT (Top 3 Risks / Opportunities per currency)");
+    const verdictRows: Array<{ Currency: string; TopRisks: string; TopOps: string }> = [];
+    for (const [ccy] of totalsByCcy.entries()) {
+      const group = enriched.filter((r) => r.currency === ccy);
+      const topRisks = [...group]
+        .sort((a, b) => b.riskScore - a.riskScore)
+        .slice(0, 3)
+        .map((r) => `${r.ticker}(${r.weightPct.toFixed(1)}%)`)
+        .join(", ");
+      const topOps = [...group]
+        .sort((a, b) => b.opportunityScore - a.opportunityScore)
+        .slice(0, 3)
+        .map((r) => `${r.ticker}(RR ${r.rrRatio.toFixed(2)})`)
+        .join(", ");
+      verdictRows.push({ Currency: ccy, TopRisks: topRisks || "-", TopOps: topOps || "-" });
+    }
+    console.table(verdictRows);
+
+    console.log("\n📋 PORTFOLIO POSITIONS");
+    console.table(
+      enriched
+        .map((r) => ({
+          Ticker: r.ticker,
+          Sector: getSector(r.ticker),
+          Qty: r.quantity,
+          Currency: r.currency,
+          Price: r.price ? `$${r.price.toFixed(2)}` : "-",
+          MV: r.marketValue.toFixed(2),
+          Weight: `${r.weightPct.toFixed(1)}%`,
+          Bias: r.bias,
+          Confidence: `${r.confidence}%`,
+          "R/R": r.rrRatio.toFixed(2),
+          Sentiment: r.sentimentLabel,
+          Invalidation: `$${r.invalidation.toFixed(2)}`,
+          "PnL%": r.pnlPct == null ? "-" : `${r.pnlPct.toFixed(2)}%`,
+          Flags: r.flags.length ? r.flags.join(",") : "-",
+          Action: suggestAction({
+            flags: r.flags,
+            bias: r.bias,
+            weightPct: r.weightPct,
+            rrRatio: r.rrRatio,
+            rsi: r.rsi,
+          }),
+        }))
+        .sort((a, b) => Number(b.MV) - Number(a.MV)),
+    );
+
+    return;
+  }
+
+  if (options.tickers.length === 1) {
+    await analyzeSymbol(normalizeTicker(options.tickers[0]), options);
+    return;
+  }
+
+  const rows = [];
+  for (const t of options.tickers) {
+    const r = await analyzeSymbol(normalizeTicker(t), options);
+    rows.push(r);
+  }
+
+  const sorted = rows
+    .map((r) => ({
+      ...r,
+      opportunity:
+        (r.bias === "Bullish" ? 20 : r.bias === "Bearish" ? 10 : 15) +
+        r.confidence +
+        Math.min(50, r.rrRatio * 10) +
+        Math.round(r.sentimentScore / 10),
+    }))
+    .sort((a, b) => b.opportunity - a.opportunity);
+
+  console.log("\n📋 WATCHLIST SCAN (Sorted by Opportunity)");
+  console.table(
+    sorted.map((r) => ({
+      Ticker: r.ticker,
+      Bias: r.bias,
+      Confidence: `${r.confidence}%`,
+      Price: `$${r.price.toFixed(2)}`,
+      "R/R": r.rrRatio.toFixed(2),
+      Sentiment: options.noNews ? "-" : r.sentimentCount === 0 ? "N/A" : `${r.sentimentScore}%`,
+      Invalidation: `$${r.invalidation.toFixed(2)}`,
+    })),
+  );
+  } finally {
+    if (outPath) {
+      try {
+        await writeFile(outPath, outLines.join("\n") + "\n", "utf8");
+        const shouldOpen = !(options.noOpen || process.env.GSTOCK_NO_OPEN === "1");
+        if (shouldOpen) {
+          await openFile(outPath);
+        }
+        originalLog(`\n✅ Exported report: ${outPath}`);
+      } catch (e: any) {
+        originalError(`\n❌ Failed to export report: ${e?.message || e}`);
+      }
+      console.log = originalLog;
+      console.table = originalTable;
+      console.error = originalError;
+    }
+  }
+}
+
+main().catch(console.error);
