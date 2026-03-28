@@ -26,16 +26,18 @@
 - **Volatility-Adjusted Risk**: Implement ATR (Average True Range) to project 1-standard-deviation price target ranges for the next session.
 - **Cross-Asset Correlation**: Eventually track Bond Yields (TNX) or Dollar Index (DXY) impact on high-growth tech (NVDA, etc.).
 
-## 7. Multi-Specialist Risk Model (BlackRock/Vanguard Grade)
-- **Flow of Capital**: On-Balance Volume (OBV) to detect if price movement is supported by actual money flow (Divergence Analysis).
-- **Mean Reversion**: Stochastic Oscillator (%K, %D) to identify precise entry/exit points during sideways consolidation.
-- **Institutional Floor**: Floor Pivot Points (P, R1, S1) to identify "Unseen" support/resistance levels used by high-frequency trading (HFT) algorithms.
-- **Risk-Reward Alpha**: Automatic calculation of R/R ratio based on current price vs. ATR-projected targets.
+## 8. Sentiment Alpha (The 10-Star Feature)
+- **News Scraper**: Integration with the `/browse` skill to scrape real-time headlines from Yahoo Finance.
+- **Sentiment Scoring**: A keyword-based heuristic that analyzes headlines for bullish vs. bearish conviction.
+- **Why it matters**: It provides the "Reason Why" behind the technical chart patterns, moving the tool from data-only to insight-driven.
 
 ---
 
-## Technical Implementation Plan (Institutional Upgrade)
-1.  **OBV Logic**: Cumulative volume total that adds/subtracts based on daily close.
-2.  **Stochastic Calculation**: 14-period %K and 3-period %D smoothing.
-3.  **Pivot Point Math**: Standard Floor Pivots using (High + Low + Close) / 3 from the previous session.
-4.  **Risk Summary**: High-level "Risk/Reward" rating for the current entry.
+## Technical Implementation Plan (Final Pro Suite)
+1.  **Browse Integration**: Use `spawnSync` to call the `browse` binary for real-time web scraping.
+2.  **Sentiment Heuristic**: Logic to scan for high-impact financial keywords (Surge, Miss, Rally, Plummet).
+3.  **Unified Report**: Sequential output of:
+    - Custom Visual Analysis (Image Match)
+    - Goldman Sachs Conviction Analysis
+    - BlackRock-grade Institutional Risk Report
+    - News Sentiment Alpha Score.

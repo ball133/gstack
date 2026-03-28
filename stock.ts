@@ -4,11 +4,47 @@
  * Usage: bun run stock.ts <TICKER> (e.g., bun run stock.ts NVDA)
  */
 
-import { join } from "path";
+import { join, dirname } from "path";
 import { homedir } from "os";
 import { appendFile } from "fs/promises";
+import { spawnSync } from "child_process";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const BROWSE_BIN = join(__dirname, "browse", "dist", "browse");
 
 const ticker = (process.argv[2] || "SPY").toUpperCase();
+
+async function getNewsSentiment(symbol: string): Promise<{ score: number; count: number }> {
+  try {
+    const url = `https://finance.yahoo.com/quote/${symbol}/news/`;
+    
+    // Use the browse binary to get text
+    spawnSync(BROWSE_BIN, ["goto", url]);
+    const result = spawnSync(BROWSE_BIN, ["text"]);
+    const text = result.stdout.toString();
+
+    // Simple keyword-based sentiment analysis
+    const bullishWords = ["surge", "rally", "buy", "growth", "positive", "beat", "up", "bullish", "high"];
+    const bearishWords = ["plummet", "drop", "sell", "decline", "negative", "miss", "down", "bearish", "low"];
+
+    let bullishCount = 0;
+    let bearishCount = 0;
+
+    const lowerText = text.toLowerCase();
+    bullishWords.forEach(w => { if (lowerText.includes(w)) bullishCount++; });
+    bearishWords.forEach(w => { if (lowerText.includes(w)) bearishCount++; });
+
+    const total = bullishCount + bearishCount;
+    if (total === 0) return { score: 50, count: 0 };
+
+    const score = Math.round((bullishCount / total) * 100);
+    return { score, count: total };
+  } catch (e) {
+    return { score: 50, count: 0 };
+  }
+}
 
 async function logToAnalytics(skillName: string, symbol: string) {
   const logDir = join(homedir(), ".gstack", "analytics");
@@ -227,12 +263,21 @@ async function runInstitutionalAnalysis(symbol: string) {
     // Step 4: Log Report Phase
     await logToAnalytics("report-generation", symbol);
 
+    // Step 5: Log Sentiment Phase
+    await logToAnalytics("news-sentiment-analysis", symbol);
+    const sentiment = await getNewsSentiment(symbol);
+
     const color = (c: number) => c > 70 ? "\x1b[32m" : c < 40 ? "\x1b[31m" : "\x1b[33m";
     const reset = "\x1b[0m";
 
     // ─── 1. ORIGINAL SPY ANALYSIS ───
     console.log(`\n📉 ${symbol} 分析`);
     console.log(`📡 正在分析${tickerName} 綜合日線與 4 小時線數據，請稍候...`);
+    
+    // Display Sentiment
+    const sentColor = sentiment.score >= 60 ? "\x1b[32m" : sentiment.score <= 40 ? "\x1b[31m" : "\x1b[33m";
+    console.log(`📰 新聞輿情分析: ${sentColor}${sentiment.score}% Bullish${reset} (基於 ${sentiment.count} 個關鍵字)`);
+
     console.log(`\n📊 ${symbol} (S&P 500) 自訂大盤特化分析 📊`);
     console.log(`最新價格: $${p.toFixed(2)}`);
     console.log(`\n📈 今日上漲機率: ${upProb}%`);
