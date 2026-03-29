@@ -21,6 +21,14 @@ type TelegramUpdate = {
     text?: string;
     chat: { id: number };
   };
+  callback_query?: {
+    id: string;
+    data?: string;
+    message?: {
+      message_id: number;
+      chat: { id: number };
+    };
+  };
 };
 
 function getToken(env: Env): string {
@@ -103,13 +111,47 @@ async function telegramApi(token: string, method: string, payload: any): Promise
   return json.result;
 }
 
-async function sendMessage(token: string, chatId: number, text: string): Promise<void> {
+type SendMessageOptions = { replyMarkup?: any };
+
+function buildInlineActions(ticker: string) {
+  const t = ticker.trim().toUpperCase();
+  const summaryData = `S|${t}`.slice(0, 64);
+  const fullData = `F|${t}`.slice(0, 64);
+  const heatmapData = `HM|${t}`.slice(0, 64);
+  return {
+    inline_keyboard: [
+      [
+        { text: "🎯 Summary", callback_data: summaryData },
+        { text: "📈 Full", callback_data: fullData },
+      ],
+      [{ text: "📋 Heatmap", callback_data: heatmapData }],
+      [{ text: "❓ Help", callback_data: "HELP" }],
+    ],
+  };
+}
+
+function decodeCallbackData(data: string): string {
+  const raw = (data || "").trim();
+  if (!raw) return "/help";
+  if (raw === "HELP") return "/help";
+  if (raw === "HM") return "/heatmap";
+  if (!raw.includes("|")) return raw;
+  const [kind, rest] = raw.split("|");
+  const payload = (rest || "").trim();
+  if (kind === "S" && payload) return `/summary ${payload}`;
+  if (kind === "F" && payload) return `/full ${payload}`;
+  if (kind === "HM") return payload ? `/heatmap ${payload}` : "/heatmap";
+  return raw;
+}
+
+async function sendMessage(token: string, chatId: number, text: string, options?: SendMessageOptions): Promise<void> {
   const chunkSize = 3900;
   for (let i = 0; i < text.length; i += chunkSize) {
     await telegramApi(token, "sendMessage", {
       chat_id: chatId,
       text: text.slice(i, i + chunkSize),
       disable_web_page_preview: true,
+      ...(options?.replyMarkup ? { reply_markup: options.replyMarkup } : {}),
     });
   }
 }
@@ -456,7 +498,8 @@ function formatFull(symbol: string, data: ChartData, profile: { risk: RiskTolera
 
 async function handle(chatId: number, text: string, env: Env): Promise<string> {
   const profile = getProfile(env);
-  const { cmd, arg } = parseCommand(text);
+  const decoded = decodeCallbackData(text);
+  const { cmd, arg } = parseCommand(decoded);
   if (cmd === "start" || cmd === "help") {
     return [
       "Commands:",
@@ -603,16 +646,28 @@ export default {
     }
 
     const msg = update.message || update.edited_message;
-    const text = msg?.text;
-    const chatId = msg?.chat?.id;
-    if (!text || !chatId) return new Response("OK", { status: 200 });
+    const cb = update.callback_query;
+    const chatId = cb?.message?.chat?.id || msg?.chat?.id;
+    const rawText = cb?.data || msg?.text;
+    if (!rawText || !chatId) return new Response("OK", { status: 200 });
     if (!isAllowed(chatId, allowed)) return new Response("OK", { status: 200 });
+
+    if (cb?.id) {
+      ctx.waitUntil(telegramApi(token, "answerCallbackQuery", { callback_query_id: cb.id }));
+    }
+
+    const text = decodeCallbackData(rawText);
 
     const cacheKey = new Request(`https://cache.local/${encodeURIComponent(chatId)}/${encodeURIComponent(text.trim())}`);
     const cached = await caches.default.match(cacheKey);
     if (cached) {
       const body = await cached.text();
-      ctx.waitUntil(sendMessage(token, chatId, body));
+      const tickerForButtonsRaw = text.startsWith("/summary ") || text.startsWith("/full ")
+        ? text.split(/\s+/)[1] || ""
+        : !text.startsWith("/") ? text : "";
+      const tickerForButtons = tickerForButtonsRaw.includes(",") ? tickerForButtonsRaw.split(",")[0] : tickerForButtonsRaw;
+      const replyMarkup = tickerForButtons ? buildInlineActions(normalizeTicker(tickerForButtons)) : undefined;
+      ctx.waitUntil(sendMessage(token, chatId, body, replyMarkup ? { replyMarkup } : undefined));
       return new Response("OK", { status: 200 });
     }
 
@@ -624,7 +679,12 @@ export default {
     }
 
     reply = escapeText(reply).slice(0, 3900 * 3);
-    ctx.waitUntil(sendMessage(token, chatId, reply));
+    const tickerForButtonsRaw = text.startsWith("/summary ") || text.startsWith("/full ")
+      ? text.split(/\s+/)[1] || ""
+      : !text.startsWith("/") ? text : "";
+    const tickerForButtons = tickerForButtonsRaw.includes(",") ? tickerForButtonsRaw.split(",")[0] : tickerForButtonsRaw;
+    const replyMarkup = tickerForButtons ? buildInlineActions(normalizeTicker(tickerForButtons)) : undefined;
+    ctx.waitUntil(sendMessage(token, chatId, reply, replyMarkup ? { replyMarkup } : undefined));
     ctx.waitUntil(
       caches.default.put(cacheKey, new Response(reply, { headers: { "cache-control": "max-age=90" } })),
     );

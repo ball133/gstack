@@ -46,7 +46,7 @@ function normalizeUserInputToTicker(text: string): string | null {
     if (!cmd) return null;
     const parts = cmd.split(/\s+/);
     const first = parts[0].toLowerCase();
-    if (first === "portfolio" || first === "help" || first === "start" || first === "watch" || first === "full" || first === "summary") return null;
+    if (first === "portfolio" || first === "help" || first === "start" || first === "watch" || first === "full" || first === "summary" || first === "heatmap") return null;
     return normalizeTickerAlias(parts[0]);
   }
 
@@ -83,6 +83,38 @@ function buildMainKeyboard() {
     one_time_keyboard: false,
     input_field_placeholder: "輸入 NVDA / 00700 / 或點選下方快捷鍵",
   };
+}
+
+function buildInlineActions(params: { ticker?: string; list?: string }) {
+  const t = (params.ticker || "").trim().toUpperCase();
+  const list = (params.list || "").trim();
+  const summaryData = t ? `S|${t}` : "HELP";
+  const fullData = t ? `F|${t}` : "HELP";
+  const heatmapData = t ? `HM|${t}` : list ? `HM|${list}` : "HM";
+  return {
+    inline_keyboard: [
+      [
+        { text: "🎯 Summary", callback_data: summaryData.slice(0, 64) },
+        { text: "📈 Full", callback_data: fullData.slice(0, 64) },
+      ],
+      [{ text: "📋 Heatmap", callback_data: heatmapData.slice(0, 64) }],
+      [{ text: "❓ Help", callback_data: "HELP" }],
+    ],
+  };
+}
+
+function decodeCallbackData(data: string): string {
+  const raw = (data || "").trim();
+  if (!raw) return "/help";
+  if (raw === "HELP") return "/help";
+  if (raw === "HM") return "/heatmap";
+  if (!raw.includes("|")) return raw;
+  const [kind, rest] = raw.split("|");
+  const payload = (rest || "").trim();
+  if (kind === "S" && payload) return `/summary ${payload}`;
+  if (kind === "F" && payload) return `/full ${payload}`;
+  if (kind === "HM") return payload ? `/heatmap ${payload}` : "/heatmap";
+  return raw;
 }
 
 async function sendMessage(chatId: number, text: string, options?: SendMessageOptions): Promise<void> {
@@ -158,7 +190,10 @@ async function runCached(key: string, run: () => Promise<{ outPath: string; stdo
 
 async function handleMessage(chatId: number, text: string): Promise<void> {
   const trimmed = text.trim();
-  if (trimmed === "/start" || trimmed === "/help") {
+  const decoded = decodeCallbackData(trimmed);
+  const effectiveText = decoded !== trimmed ? decoded : trimmed;
+
+  if (effectiveText === "/start" || effectiveText === "/help") {
     await sendMessage(
       chatId,
       [
@@ -177,7 +212,7 @@ async function handleMessage(chatId: number, text: string): Promise<void> {
     return;
   }
 
-  if (trimmed === "📌 新手完全指南") {
+  if (effectiveText === "📌 新手完全指南") {
     await sendMessage(
       chatId,
       [
@@ -195,22 +230,22 @@ async function handleMessage(chatId: number, text: string): Promise<void> {
     return;
   }
 
-  if (trimmed === "🧾 投資組合") {
+  if (effectiveText === "🧾 投資組合") {
     await handleMessage(chatId, "/portfolio");
     return;
   }
 
-  if (trimmed === "👀 Watchlist 掃描") {
+  if (effectiveText === "👀 Watchlist 掃描") {
     await sendMessage(chatId, "Usage: `/watch NVDA,AAPL,TSLA`", { replyMarkup: buildMainKeyboard() });
     return;
   }
 
-  if (trimmed === "📋 股票熱力圖") {
+  if (effectiveText === "📋 股票熱力圖") {
     await handleMessage(chatId, "/heatmap");
     return;
   }
 
-  if (trimmed === "⚙️ Profile 設定") {
+  if (effectiveText === "⚙️ Profile 設定") {
     await sendMessage(
       chatId,
       [
@@ -225,7 +260,7 @@ async function handleMessage(chatId: number, text: string): Promise<void> {
     return;
   }
 
-  if (trimmed.startsWith("/portfolio")) {
+  if (effectiveText.startsWith("/portfolio")) {
     mkdirSync(REPORTS_DIR, { recursive: true });
     const key = `portfolio:summary`;
     const out = join(REPORTS_DIR, `portfolio_${Date.now()}.txt`);
@@ -238,10 +273,11 @@ async function handleMessage(chatId: number, text: string): Promise<void> {
       return;
     }
     await sendDocument(chatId, cached.outPath, cached.hit ? "Portfolio summary (cached)" : "Portfolio summary");
+    await sendMessage(chatId, "✅ Portfolio ready.", { replyMarkup: buildInlineActions({}) });
     return;
   }
 
-  const watchMatch = trimmed.match(/^\/watch\s+(.+)$/i);
+  const watchMatch = effectiveText.match(/^\/watch\s+(.+)$/i);
   if (watchMatch) {
     const list = watchMatch[1].trim();
     if (!list) {
@@ -260,10 +296,11 @@ async function handleMessage(chatId: number, text: string): Promise<void> {
       return;
     }
     await sendDocument(chatId, cached.outPath, cached.hit ? "Watchlist scan (cached)" : "Watchlist scan");
+    await sendMessage(chatId, "✅ Watchlist ready.", { replyMarkup: buildInlineActions({ list }) });
     return;
   }
 
-  const heatmapMatch = trimmed.match(/^\/heatmap(?:\s+(.+))?$/i);
+  const heatmapMatch = effectiveText.match(/^\/heatmap(?:\s+(.+))?$/i);
   if (heatmapMatch) {
     const list = (heatmapMatch[1] || "").trim();
     mkdirSync(REPORTS_DIR, { recursive: true });
@@ -287,6 +324,7 @@ async function handleMessage(chatId: number, text: string): Promise<void> {
         return;
       }
       await sendDocument(chatId, cached.outPath, cached.hit ? "Heatmap (portfolio, cached)" : "Heatmap (portfolio)");
+      await sendMessage(chatId, "✅ Heatmap ready.", { replyMarkup: buildInlineActions({}) });
       return;
     }
 
@@ -303,11 +341,12 @@ async function handleMessage(chatId: number, text: string): Promise<void> {
       return;
     }
     await sendDocument(chatId, cached.outPath, cached.hit ? "Heatmap (cached)" : "Heatmap");
+    await sendMessage(chatId, "✅ Heatmap ready.", { replyMarkup: buildInlineActions({ list }) });
     return;
   }
 
-  const fullMatch = trimmed.match(/^\/full\s+(\S+)/i);
-  const summaryMatch = trimmed.match(/^\/summary\s+(\S+)/i);
+  const fullMatch = effectiveText.match(/^\/full\s+(\S+)/i);
+  const summaryMatch = effectiveText.match(/^\/summary\s+(\S+)/i);
 
   let ticker: string | null = null;
   let mode: "full" | "summary" = "full";
@@ -319,7 +358,7 @@ async function handleMessage(chatId: number, text: string): Promise<void> {
     ticker = normalizeTickerAlias(summaryMatch[1]);
     mode = "summary";
   } else {
-    ticker = normalizeUserInputToTicker(trimmed);
+    ticker = normalizeUserInputToTicker(effectiveText);
     mode = "full";
   }
 
@@ -343,7 +382,7 @@ async function handleMessage(chatId: number, text: string): Promise<void> {
   }
 
   if (cached.brief) {
-    await sendMessage(chatId, `\`\`\`\n${escapeMarkdown(cached.brief)}\n\`\`\``);
+    await sendMessage(chatId, `\`\`\`\n${escapeMarkdown(cached.brief)}\n\`\`\``, { replyMarkup: buildInlineActions({ ticker }) });
   }
   await sendDocument(chatId, cached.outPath, cached.hit ? `${ticker} report (${mode}, cached)` : `${ticker} report (${mode})`);
 }
@@ -368,6 +407,17 @@ async function run() {
       const updates: any[] = json.result || [];
       for (const u of updates) {
         offset = (u.update_id || 0) + 1;
+        const cb = u.callback_query;
+        if (cb?.data && cb?.id && cb?.message?.chat?.id) {
+          const chatId = cb.message.chat.id;
+          if (!isAllowedChat(chatId)) continue;
+          try {
+            await apiCall("answerCallbackQuery", { callback_query_id: cb.id });
+          } catch {}
+          await handleMessage(chatId, String(cb.data));
+          continue;
+        }
+
         const msg = u.message || u.edited_message;
         const text = msg?.text;
         const chatId = msg?.chat?.id;
