@@ -218,6 +218,47 @@ async function fetchFredLatest(seriesId: string): Promise<number | null> {
   return null;
 }
 
+async function fetchFredLastTwo(seriesId: string): Promise<{ latest: number; prev: number | null } | null> {
+  const cacheKey = new Request(`https://cache.local/fred2/${encodeURIComponent(seriesId)}`);
+  const cached = await caches.default.match(cacheKey);
+  if (cached) {
+    try {
+      const json = await cached.json<any>();
+      const latest = Number(json?.latest);
+      const prev = json?.prev != null ? Number(json.prev) : null;
+      if (!Number.isFinite(latest)) return null;
+      if (prev != null && !Number.isFinite(prev)) return null;
+      return { latest, prev };
+    } catch {
+      // ignore
+    }
+  }
+
+  const url = `https://fred.stlouisfed.org/graph/fredgraph.csv?id=${encodeURIComponent(seriesId)}`;
+  const res = await fetch(url, { headers: { "user-agent": "Mozilla/5.0" } });
+  const csv = await res.text();
+  const lines = csv.trim().split(/\r?\n/);
+  if (lines.length < 2) return null;
+
+  const values: number[] = [];
+  for (let i = lines.length - 1; i >= 1; i--) {
+    const parts = lines[i].split(",");
+    if (parts.length < 2) continue;
+    const v = parts[1].trim();
+    if (!v || v === ".") continue;
+    const n = Number(v);
+    if (!Number.isFinite(n)) continue;
+    values.push(n);
+    if (values.length >= 2) break;
+  }
+  if (values.length === 0) return null;
+  const latest = values[0];
+  const prev = values.length > 1 ? values[1] : null;
+  const payload = JSON.stringify({ latest, prev });
+  await caches.default.put(cacheKey, new Response(payload, { headers: { "cache-control": "max-age=300" } }));
+  return { latest, prev };
+}
+
 function weeklyCloses(timestamps: number[], closes: number[]): number[] {
   const n = Math.min(timestamps.length, closes.length);
   const out: number[] = [];
@@ -288,14 +329,12 @@ async function formatMacroDashboard(profile: { risk: RiskTolerance; horizon: Hor
   const gold = await fetchYahooChart("GC=F");
   const wti = await fetchYahooChart("CL=F");
   const dxy = await fetchYahooChart("DX-Y.NYB");
-  const tnx = await fetchYahooChart("^TNX");
 
   const pVix = vix.closes[vix.closes.length - 1] || 0;
   const pSpx = spx.closes[spx.closes.length - 1] || 0;
   const pGold = gold.closes[gold.closes.length - 1] || 0;
   const pWti = wti.closes[wti.closes.length - 1] || 0;
   const pDxy = dxy.closes[dxy.closes.length - 1] || 0;
-  const pTnx = tnx.closes[tnx.closes.length - 1] || 0;
 
   const chg = (series: ChartData) => {
     const last = series.closes[series.closes.length - 1] || 0;
@@ -306,6 +345,10 @@ async function formatMacroDashboard(profile: { risk: RiskTolerance; horizon: Hor
   const hyOas = await fetchFredLatest("BAMLH0A0HYM2");
   const igOas = await fetchFredLatest("BAMLC0A0CM");
   const sofr = await fetchFredLatest("SOFR");
+
+  const us2y = await fetchFredLastTwo("DGS2");
+  const us10y = await fetchFredLastTwo("DGS10");
+  const us30y = await fetchFredLastTwo("DGS30");
 
   const walcl = await fetchFredLatest("WALCL");
   const rrp = await fetchFredLatest("RRPONTSYD");
@@ -337,7 +380,18 @@ async function formatMacroDashboard(profile: { risk: RiskTolerance; horizon: Hor
   if (hyOas != null) parts.push(`- HY OAS: ${hyOas.toFixed(2)}% (${Math.round(hyOas * 100)} bps)`);
   if (igOas != null) parts.push(`- IG OAS: ${igOas.toFixed(2)}% (${Math.round(igOas * 100)} bps)`);
   parts.push(`- DXY: ${pDxy.toFixed(2)} (${fmtPct(chg(dxy))})`);
-  parts.push(`- US 10Y (^TNX): ${(pTnx / 10).toFixed(2)}%`);
+  if (us2y) {
+    const d = us2y.prev != null ? (us2y.latest - us2y.prev) * 100 : null;
+    parts.push(`- US 2Y: ${us2y.latest.toFixed(2)}% (${d != null ? `${d >= 0 ? "+" : ""}${d.toFixed(0)} bps` : "Δ N/A"})`);
+  }
+  if (us10y) {
+    const d = us10y.prev != null ? (us10y.latest - us10y.prev) * 100 : null;
+    parts.push(`- US 10Y: ${us10y.latest.toFixed(2)}% (${d != null ? `${d >= 0 ? "+" : ""}${d.toFixed(0)} bps` : "Δ N/A"})`);
+  }
+  if (us30y) {
+    const d = us30y.prev != null ? (us30y.latest - us30y.prev) * 100 : null;
+    parts.push(`- US 30Y: ${us30y.latest.toFixed(2)}% (${d != null ? `${d >= 0 ? "+" : ""}${d.toFixed(0)} bps` : "Δ N/A"})`);
+  }
   parts.push("");
   parts.push("💧 流動性狀態");
   if (netLiquidity != null) parts.push(`- Net Liquidity (WALCL-RRP-TGA): ${netLiquidity.toFixed(2)}B`);

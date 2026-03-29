@@ -388,6 +388,27 @@ async function fetchFredLatest(seriesId: string): Promise<number | null> {
   return null;
 }
 
+async function fetchFredLastTwo(seriesId: string): Promise<{ latest: number; prev: number | null } | null> {
+  const url = `https://fred.stlouisfed.org/graph/fredgraph.csv?id=${encodeURIComponent(seriesId)}`;
+  const res = await fetch(url, { headers: { "user-agent": "Mozilla/5.0" } });
+  const csv = await res.text();
+  const lines = csv.trim().split(/\r?\n/);
+  if (lines.length < 2) return null;
+  const values: number[] = [];
+  for (let i = lines.length - 1; i >= 1; i--) {
+    const parts = lines[i].split(",");
+    if (parts.length < 2) continue;
+    const v = parts[1].trim();
+    if (!v || v === ".") continue;
+    const n = Number(v);
+    if (!Number.isFinite(n)) continue;
+    values.push(n);
+    if (values.length >= 2) break;
+  }
+  if (values.length === 0) return null;
+  return { latest: values[0], prev: values.length > 1 ? values[1] : null };
+}
+
 function weeklyCloses(timestamps: number[], closes: number[]): number[] {
   const n = Math.min(timestamps.length, closes.length);
   const out: number[] = [];
@@ -520,7 +541,6 @@ async function formatMacroDashboard(): Promise<string> {
   const gold = await fetchYahooChart("GC=F");
   const wti = await fetchYahooChart("CL=F");
   const dxy = await fetchYahooChart("DX-Y.NYB");
-  const tnx = await fetchYahooChart("^TNX");
 
   const chg = (series: { closes: number[] }) => {
     const last = series.closes[series.closes.length - 1] || 0;
@@ -531,6 +551,10 @@ async function formatMacroDashboard(): Promise<string> {
   const hyOas = await fetchFredLatest("BAMLH0A0HYM2");
   const igOas = await fetchFredLatest("BAMLC0A0CM");
   const sofr = await fetchFredLatest("SOFR");
+
+  const us2y = await fetchFredLastTwo("DGS2");
+  const us10y = await fetchFredLastTwo("DGS10");
+  const us30y = await fetchFredLastTwo("DGS30");
 
   const walcl = await fetchFredLatest("WALCL");
   const rrp = await fetchFredLatest("RRPONTSYD");
@@ -564,7 +588,10 @@ async function formatMacroDashboard(): Promise<string> {
   if (hyOas != null) parts.push(`- HY OAS: ${hyOas.toFixed(2)}% (${Math.round(hyOas * 100)} bps)`);
   if (igOas != null) parts.push(`- IG OAS: ${igOas.toFixed(2)}% (${Math.round(igOas * 100)} bps)`);
   parts.push(`- DXY: ${(dxy.closes[dxy.closes.length - 1] || 0).toFixed(2)} (${fmtPct(chg(dxy))})`);
-  parts.push(`- US 10Y: ${((tnx.closes[tnx.closes.length - 1] || 0) / 10).toFixed(2)}%`);
+  const fmtBps = (d: number | null) => (d == null ? "Δ N/A" : `${d >= 0 ? "+" : ""}${d.toFixed(0)} bps`);
+  if (us2y) parts.push(`- US 2Y: ${us2y.latest.toFixed(2)}% (${fmtBps(us2y.prev != null ? (us2y.latest - us2y.prev) * 100 : null)})`);
+  if (us10y) parts.push(`- US 10Y: ${us10y.latest.toFixed(2)}% (${fmtBps(us10y.prev != null ? (us10y.latest - us10y.prev) * 100 : null)})`);
+  if (us30y) parts.push(`- US 30Y: ${us30y.latest.toFixed(2)}% (${fmtBps(us30y.prev != null ? (us30y.latest - us30y.prev) * 100 : null)})`);
   parts.push("");
   parts.push("💧 **Liquidity Status**");
   if (netLiquidity != null) parts.push(`- Net liquidity: ${netLiquidity.toFixed(2)}B`);
