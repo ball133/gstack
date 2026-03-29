@@ -121,11 +121,11 @@ function buildInlineActions(ticker: string) {
   return {
     inline_keyboard: [
       [
-        { text: "🎯 Summary", callback_data: summaryData },
-        { text: "📈 Full", callback_data: fullData },
+        { text: "🎯 重點", callback_data: summaryData },
+        { text: "📈 完整", callback_data: fullData },
       ],
-      [{ text: "📋 Heatmap", callback_data: heatmapData }],
-      [{ text: "❓ Help", callback_data: "HELP" }],
+      [{ text: "📋 熱力圖", callback_data: heatmapData }],
+      [{ text: "❓ 說明", callback_data: "HELP" }],
     ],
   };
 }
@@ -429,6 +429,24 @@ type Bias = "Bullish" | "Neutral" | "Bearish";
 type RiskTolerance = "low" | "medium" | "high";
 type Horizon = "day" | "swing" | "invest";
 
+function biasLabelZh(b: Bias): string {
+  if (b === "Bullish") return "偏多";
+  if (b === "Bearish") return "偏空";
+  return "中性";
+}
+
+function riskLabelZh(r: RiskTolerance): string {
+  if (r === "low") return "低";
+  if (r === "high") return "高";
+  return "中";
+}
+
+function horizonLabelZh(h: Horizon): string {
+  if (h === "day") return "當沖";
+  if (h === "invest") return "投資";
+  return "波段";
+}
+
 function normalizeRisk(raw: string | undefined): RiskTolerance {
   const v = (raw || "").trim().toLowerCase();
   if (v === "low" || v === "l") return "low";
@@ -451,11 +469,11 @@ function formatFooter(profile: { risk: RiskTolerance; horizon: Horizon }, asOfUn
   const asOfIso = asOfUnix ? new Date(asOfUnix * 1000).toISOString() : "-";
   const generatedIso = new Date().toISOString();
   return [
-    "Data: Yahoo Finance chart v8",
-    "Daily: 1d/1y",
-    `As-of: ${asOfIso}`,
-    `Generated: ${generatedIso}`,
-    `Profile: risk=${profile.risk} horizon=${profile.horizon}`,
+    "資料: Yahoo Finance chart v8",
+    "日線: 1d/1y",
+    `資料時間: ${asOfIso}`,
+    `產生時間: ${generatedIso}`,
+    `偏好: 風險=${riskLabelZh(profile.risk)} 週期=${horizonLabelZh(profile.horizon)}`,
   ].join(" | ");
 }
 
@@ -557,11 +575,11 @@ function formatBrief(symbol: string, data: ChartData, profile: { risk: RiskToler
   const invalidation = computeInvalidation(bias, d20, r1, s1);
 
   const lines = [
-    `TRADING BRIEF: ${symbol}`,
-    `Bias: ${bias} | Confidence: ${confidence}%`,
-    `Price: ${price.toFixed(2)} ${data.currency} | RSI(14): ${rsi.toFixed(1)} | MACD(H): ${hist.toFixed(2)}`,
-    `Daily20MA: ${d20.toFixed(2)} | Daily200MA: ${d200.toFixed(2)}`,
-    `ATR(14): ${atr.toFixed(2)} | Invalidation: ${invalidation.toFixed(2)}`,
+    `交易簡報: ${symbol}`,
+    `趨勢偏向: ${biasLabelZh(bias)} | 信心度: ${confidence}%`,
+    `現價: ${price.toFixed(2)} ${data.currency} | RSI(14): ${rsi.toFixed(1)} | MACD(H): ${hist.toFixed(2)}`,
+    `日線20MA: ${d20.toFixed(2)} | 日線200MA: ${d200.toFixed(2)}`,
+    `ATR(14): ${atr.toFixed(2)} | 失效點(Inval): ${invalidation.toFixed(2)}`,
   ];
   return lines.join("\n");
 }
@@ -601,105 +619,105 @@ function formatFull(symbol: string, data: ChartData, profile: { risk: RiskTolera
   const fmtPct = (x: number) => `${x >= 0 ? "+" : ""}${x.toFixed(2)}%`;
   const verdict =
     bias === "Bullish" && confidence >= 70
-      ? "Trend-following long bias"
+      ? "偏多（順勢）"
       : bias === "Bearish" && confidence <= 30
-        ? "Risk-off / defensive"
-        : "Wait for confirmation";
+        ? "偏空／防守"
+        : "等待確認";
 
   const suggestedAction =
     bias === "Bullish"
       ? profile.risk === "low"
-        ? "Hold; add only after confirmation above 20MA"
-        : "Hold/add on pullback; use invalidation as stop"
+        ? "觀望/持有；站回20MA後再考慮加碼"
+        : "持有/逢回加碼；以失效點作停損"
       : bias === "Bearish"
         ? profile.risk === "high"
-          ? "Avoid adding; consider tactical hedge / short only with strict stop"
-          : "Avoid adding; wait for trend reclaim"
-        : "Hold; wait for breakout/confirm";
+          ? "避免加碼；可考慮戰術性避險/短打（嚴格停損）"
+          : "避免加碼；等待趨勢收復"
+        : "持有觀望；等待突破/確認";
 
   const driverLines = [
-    `Trend: ${above20 ? "Above 20MA ✅" : "Below 20MA ❌"} | 20MA ${d20.toFixed(2)}`,
-    `Regime: ${above200 ? "Above 200MA ✅" : "Below 200MA ❌"} | 200MA ${d200.toFixed(2)}`,
-    `Momentum: MACD(H) ${hist > 0 ? "+" : ""}${hist.toFixed(2)} (${macdBull ? "Bullish" : "Bearish"})`,
-    `Flow: OBV ${obv}`,
-    `Mean-reversion: RSI(14) ${rsi.toFixed(1)} (${rsiState})`,
+    `短線趨勢: ${above20 ? "站上20MA ✅" : "跌破20MA ❌"} | 20MA ${d20.toFixed(2)}`,
+    `長線結構: ${above200 ? "站上200MA ✅" : "跌破200MA ❌"} | 200MA ${d200.toFixed(2)}`,
+    `動能: MACD(H) ${hist > 0 ? "+" : ""}${hist.toFixed(2)} (${macdBull ? "偏多" : "偏空"})`,
+    `資金流: OBV ${obv}`,
+    `均值狀態: RSI(14) ${rsi.toFixed(1)} (${rsiState})`,
   ];
 
   const planLines =
     bias === "Bearish"
       ? [
-          "Plan (next move):",
-          `- Defensive until price reclaims 20MA (${d20.toFixed(2)}) and holds`,
-          `- Downside marker: S1 ${s1.toFixed(2)}; ATR(14) ${atr.toFixed(2)} (~${atrPct.toFixed(1)}%)`,
-          `- Invalidation (risk stop): ${invalidation.toFixed(2)} ${data.currency}`,
+          "交易計劃（下一步）:",
+          `- 防守為主：先看能否收復並站穩20MA（${d20.toFixed(2)}）`,
+          `- 下方觀察：S1 ${s1.toFixed(2)}；ATR(14) ${atr.toFixed(2)}（約${atrPct.toFixed(1)}%）`,
+          `- 失效點（風控停損參考）: ${invalidation.toFixed(2)} ${data.currency}`,
         ]
       : bias === "Bullish"
         ? [
-            "Plan (next move):",
-            `- Prefer buys on pullback above 20MA (${d20.toFixed(2)})`,
-            `- Upside marker: R1 ${r1.toFixed(2)}; 1-ATR target ${(price + atr).toFixed(2)}`,
-            `- Invalidation (risk stop): ${invalidation.toFixed(2)} ${data.currency}`,
+            "交易計劃（下一步）:",
+            `- 優先策略：站上20MA（${d20.toFixed(2)}）後回踩不破再布局`,
+            `- 上方觀察：R1 ${r1.toFixed(2)}；1-ATR 目標 ${(price + atr).toFixed(2)}`,
+            `- 失效點（風控停損參考）: ${invalidation.toFixed(2)} ${data.currency}`,
           ]
         : [
-            "Plan (next move):",
-            `- Neutral: wait for break above 20MA (${d20.toFixed(2)}) or clean test/hold of S1 ${s1.toFixed(2)}`,
-            `- Invalidation reference: ${invalidation.toFixed(2)} ${data.currency}`,
+            "交易計劃（下一步）:",
+            `- 中性：等突破站穩20MA（${d20.toFixed(2)}）或回測S1（${s1.toFixed(2)}）止跌`,
+            `- 失效點參考: ${invalidation.toFixed(2)} ${data.currency}`,
           ];
 
   return [
-    `TRADING BRIEF: ${symbol}`,
-    `Bias: ${bias} | Confidence: ${confidence}% | ${verdict}`,
-    `Price: ${price.toFixed(2)} ${data.currency} | 1D ${fmtPct(change1d)} | 5D ${fmtPct(change5d)} | 1M ${fmtPct(change1m)}`,
-    `Invalidation: ${invalidation.toFixed(2)} ${data.currency} | ATR(14): ${atr.toFixed(2)} (${atrPct.toFixed(1)}%) | R/R: ${rrRatio.toFixed(2)}x`,
-    `Action: ${suggestedAction}`,
+    `交易簡報: ${symbol}`,
+    `趨勢偏向: ${biasLabelZh(bias)} | 信心度: ${confidence}% | 結論: ${verdict}`,
+    `現價: ${price.toFixed(2)} ${data.currency} | 1日 ${fmtPct(change1d)} | 5日 ${fmtPct(change5d)} | 1月 ${fmtPct(change1m)}`,
+    `失效點(Inval): ${invalidation.toFixed(2)} ${data.currency} | ATR(14): ${atr.toFixed(2)}（${atrPct.toFixed(1)}%） | R/R: ${rrRatio.toFixed(2)}x`,
+    `建議: ${suggestedAction}`,
     "",
-    "Signal Drivers",
+    "訊號驅動（為何如此判斷）",
     ...driverLines.map((l) => `- ${l}`),
     "",
     ...planLines,
     "",
-    "Key Levels",
+    "關鍵價位",
     "",
-    `Resistance`,
-    `  - Pivot R1:  ${r1.toFixed(2)}`,
-    `  - Daily 20MA: ${d20.toFixed(2)}`,
-    `  - Daily 50MA: ${d50.toFixed(2)}`,
+    `上方壓力`,
+    `  - 樞軸 R1:   ${r1.toFixed(2)}`,
+    `  - 日線 20MA: ${d20.toFixed(2)}`,
+    `  - 日線 50MA: ${d50.toFixed(2)}`,
     "",
-    `Support`,
-    `  - Daily BB(20,2) Lower: ${dBBLower.toFixed(2)}`,
-    `  - Pivot S1:             ${s1.toFixed(2)}`,
-    `  - Daily 200MA:          ${d200.toFixed(2)}`,
+    `下方支撐`,
+    `  - 布林下軌(BB20,2): ${dBBLower.toFixed(2)}`,
+    `  - 樞軸 S1:           ${s1.toFixed(2)}`,
+    `  - 日線 200MA:        ${d200.toFixed(2)}`,
     "",
-    `GOLDMAN SACHS SECURITY ANALYSIS: ${symbol}`,
+    `GOLDMAN SACHS 證券分析: ${symbol}`,
     `================================================`,
-    `Current Quote: ${price.toFixed(2)} ${data.currency} | RSI(14): ${rsi.toFixed(1)} (${rsiState})`,
-    `Trend Conviction: ${confidence}% | Profile: risk=${profile.risk} horizon=${profile.horizon}`,
+    `現價: ${price.toFixed(2)} ${data.currency} | RSI(14): ${rsi.toFixed(1)}（${rsiState}）`,
+    `趨勢信心: ${confidence}% | 偏好: 風險=${riskLabelZh(profile.risk)} 週期=${horizonLabelZh(profile.horizon)}`,
     "",
-    `MOMENTUM (MACD)`,
-    `  - Histogram: ${hist > 0 ? "+" : ""}${hist.toFixed(2)} (${hist > 0 ? "Bullish" : "Bearish"})`,
+    `動能 (MACD)`,
+    `  - 柱狀圖: ${hist > 0 ? "+" : ""}${hist.toFixed(2)}（${hist > 0 ? "偏多" : "偏空"}）`,
     "",
-    `VOLATILITY PROJECTIONS (1-ATR)`,
-    `  - Bullish Target: ${(price + atr).toFixed(2)} ${data.currency}`,
-    `  - Bearish Support: ${(price - atr).toFixed(2)} ${data.currency}`,
+    `波動推演 (1-ATR)`,
+    `  - 上方目標: ${(price + atr).toFixed(2)} ${data.currency}`,
+    `  - 下方支撐: ${(price - atr).toFixed(2)} ${data.currency}`,
     "",
-    `INSTITUTIONAL RISK REPORT: ${symbol}`,
+    `機構風險報告: ${symbol}`,
     `================================================`,
-    `Price: ${price.toFixed(2)} ${data.currency} | RSI: ${rsi.toFixed(1)} (${rsiState}) | ATR%: ${atrPct.toFixed(1)}%`,
+    `現價: ${price.toFixed(2)} ${data.currency} | RSI: ${rsi.toFixed(1)}（${rsiState}） | ATR%: ${atrPct.toFixed(1)}%`,
     "",
-    `CAPITAL FLOW (OBV)`,
-    `  - Money Flow: ${obv}`,
+    `資金流 (OBV)`,
+    `  - 狀態: ${obv}`,
     "",
-    `HFT PIVOT LEVELS (Floor)`,
-    `  - Resistance (R1): ${r1.toFixed(2)}`,
-    `  - Central Pivot (P): ${p.toFixed(2)}`,
-    `  - Support (S1): ${s1.toFixed(2)}`,
+    `樞軸位 (Floor Pivot)`,
+    `  - 壓力 (R1): ${r1.toFixed(2)}`,
+    `  - 樞軸 (P):  ${p.toFixed(2)}`,
+    `  - 支撐 (S1): ${s1.toFixed(2)}`,
     "",
-    `ALPHA RISK MODEL`,
-    `  - Risk/Reward: ${rrRatio.toFixed(2)}x ${rrRatio > 2 ? "ATTRACTIVE" : "UNFAVORABLE"}`,
+    `風險報酬模型`,
+    `  - R/R: ${rrRatio.toFixed(2)}x ${rrRatio > 2 ? "具吸引力" : "不理想"}`,
     "",
-    `LONG-TERM STRUCTURE`,
-    `  - Daily 200MA: ${d200.toFixed(2)} (${price > d200 ? "Bullish Phase" : "Bearish Phase"})`,
-    `  - Daily 20MA:  ${d20.toFixed(2)} (${price > d20 ? "Short-term Strength" : "Short-term Weakness"})`,
+    `長短線結構`,
+    `  - 日線 200MA: ${d200.toFixed(2)}（${price > d200 ? "多頭區" : "空頭區"}）`,
+    `  - 日線 20MA:  ${d20.toFixed(2)}（${price > d20 ? "短線轉強" : "短線偏弱"}）`,
     `================================================`,
   ].join("\n");
 }
@@ -710,17 +728,17 @@ async function handle(chatId: number, text: string, env: Env): Promise<string> {
   const { cmd, arg } = parseCommand(decoded);
   if (cmd === "start" || cmd === "help") {
     return [
-      "Commands:",
-      "- Send `NVDA` (defaults to full report, no-news)",
-      "- `/full NVDA`",
-      "- `/summary NVDA`",
-      "- `/watch NVDA,AAPL,TSLA`",
-      "- `/heatmap NVDA,AAPL,TSLA`",
-      "- `/marksix` (default 30 draws)",
+      "指令（Commands）:",
+      "- 直接輸入 `NVDA`（預設回覆：完整報告、無新聞）",
+      "- `/full NVDA`（完整）",
+      "- `/summary NVDA`（重點）",
+      "- `/watch NVDA,AAPL,TSLA`（觀察清單掃描）",
+      "- `/heatmap NVDA,AAPL,TSLA`（熱力圖）",
+      "- `/marksix`（預設 30 期）",
       "- `/marksix 60`",
-      "- `/portfolio`",
+      "- `/portfolio`（用 PORTFOLIO 變數）",
       "",
-      "Profile (env vars): RISK=low|medium|high, HORIZON=day|swing|invest",
+      "偏好設定（env vars）: RISK=low|medium|high, HORIZON=day|swing|invest",
     ].join("\n");
   }
 
@@ -732,7 +750,7 @@ async function handle(chatId: number, text: string, env: Env): Promise<string> {
 
   if (cmd === "portfolio") {
     const spec = (env.PORTFOLIO || "").trim();
-    if (!spec) return "PORTFOLIO not configured in worker env. Set PORTFOLIO like: NVDA,AAPL,0700.HK";
+    if (!spec) return "未設定 PORTFOLIO。請在 Worker env 設定 PORTFOLIO，例如：NVDA,AAPL,0700.HK";
     const tickers = spec.split(",").map((s) => normalizeTicker(s)).filter(Boolean);
     const briefs: string[] = [];
     let maxAsOf = 0;
@@ -747,7 +765,7 @@ async function handle(chatId: number, text: string, env: Env): Promise<string> {
   }
 
   if (cmd === "watch") {
-    if (!arg) return "Usage: /watch NVDA,AAPL,TSLA";
+    if (!arg) return "用法: /watch NVDA,AAPL,TSLA";
     const tickers = arg.split(",").map((s) => normalizeTicker(s)).filter(Boolean).slice(0, 20);
     const rows: Array<{ t: string; bias: Bias; conf: number; price: number; rsi: number }> = [];
     let maxAsOf = 0;
@@ -763,9 +781,9 @@ async function handle(chatId: number, text: string, env: Env): Promise<string> {
       rows.push({ t, bias, conf: confidence, price, rsi });
     }
     rows.sort((a, b) => b.conf - a.conf);
-    const lines = ["WATCHLIST (sorted by confidence):"];
+    const lines = ["觀察清單（按信心度排序）:"];
     for (const r of rows) {
-      lines.push(`${r.t}: ${r.bias} ${r.conf}% | ${r.price.toFixed(2)} | RSI ${r.rsi.toFixed(1)}`);
+      lines.push(`${r.t}: ${biasLabelZh(r.bias)} ${r.conf}% | ${r.price.toFixed(2)} | RSI ${r.rsi.toFixed(1)}`);
     }
     lines.push("");
     lines.push(formatFooter(profile, maxAsOf));
@@ -774,7 +792,7 @@ async function handle(chatId: number, text: string, env: Env): Promise<string> {
 
   if (cmd === "heatmap") {
     const raw = (arg || (env.PORTFOLIO || "").trim()).trim();
-    if (!raw) return "Usage: /heatmap NVDA,AAPL,TSLA (or set PORTFOLIO env)";
+    if (!raw) return "用法: /heatmap NVDA,AAPL,TSLA（或設定 PORTFOLIO env）";
     const tickers = raw.split(",").map((s) => normalizeTicker(s)).filter(Boolean).slice(0, 30);
     const rows: Array<{
       t: string;
@@ -815,7 +833,7 @@ async function handle(chatId: number, text: string, env: Env): Promise<string> {
       bySector.set(key, arr);
     }
     const sectors = Array.from(bySector.keys()).sort((a, b) => a.localeCompare(b));
-    const lines = ["股票熱力圖 (按產業分組) — 1D/5D/1M + 趨勢強度", ""];
+    const lines = ["股票熱力圖（按產業分組）— 1日/5日/1月 + 趨勢強度", ""];
     for (const s of sectors) {
       lines.push(`🏷️ ${s}`);
       const group = (bySector.get(s) || []).sort((a, b) => b.conf - a.conf);
@@ -824,7 +842,7 @@ async function handle(chatId: number, text: string, env: Env): Promise<string> {
         const c1s = `${r.c1 >= 0 ? "+" : ""}${r.c1.toFixed(2)}%`;
         const c5s = `${r.c5 >= 0 ? "+" : ""}${r.c5.toFixed(2)}%`;
         const cMs = `${r.cM >= 0 ? "+" : ""}${r.cM.toFixed(2)}%`;
-        lines.push(`${block} ${r.t}  ${c1s} (5D ${c5s}, 1M ${cMs})  ${r.bias} ${r.conf}%  ${r.price.toFixed(2)} ${r.ccy}`);
+        lines.push(`${block} ${r.t}  ${c1s}（5日 ${c5s}，1月 ${cMs}）  ${biasLabelZh(r.bias)} ${r.conf}%  ${r.price.toFixed(2)} ${r.ccy}`);
       }
       lines.push("");
     }

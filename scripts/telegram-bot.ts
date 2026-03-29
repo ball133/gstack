@@ -95,11 +95,11 @@ function buildInlineActions(params: { ticker?: string; list?: string }) {
   return {
     inline_keyboard: [
       [
-        { text: "🎯 Summary", callback_data: summaryData.slice(0, 64) },
-        { text: "📈 Full", callback_data: fullData.slice(0, 64) },
+        { text: "🎯 重點", callback_data: summaryData.slice(0, 64) },
+        { text: "📈 完整", callback_data: fullData.slice(0, 64) },
       ],
-      [{ text: "📋 Heatmap", callback_data: heatmapData.slice(0, 64) }],
-      [{ text: "❓ Help", callback_data: "HELP" }],
+      [{ text: "📋 熱力圖", callback_data: heatmapData.slice(0, 64) }],
+      [{ text: "❓ 說明", callback_data: "HELP" }],
     ],
   };
 }
