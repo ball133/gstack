@@ -362,39 +362,66 @@ function fmtPct(x: number): string {
   return s;
 }
 
-async function formatMacroDashboard(profile: { risk: RiskTolerance; horizon: Horizon }): Promise<string> {
-  const btc = await fetchYahooChart("BTC-USD");
+async function buildMorningContext(profile: { risk: RiskTolerance; horizon: Horizon }): Promise<{
+  isoDate: string;
+  asOfUnix: number;
+  lines: string[];
+  btcPrice: number;
+  btcSignal: string;
+  btcPos: string;
+  btcMet: number;
+  rsiD: number;
+  rsiW: number;
+  s30: number;
+  vix: ChartData;
+  spx: ChartData;
+  dxy: ChartData;
+  pVix: number;
+  pSpx: number;
+  pDxy: number;
+  vixChgPct: number;
+  spxChgPct: number;
+  dxyChgPct: number;
+  hyOas: number | null;
+  yc: { asOfDate: string; latest: { y2: number; y10: number; y30: number }; prev: { y2: number; y10: number; y30: number } } | null;
+  us10y: number | null;
+  us10yChgBps: number | null;
+  regime: "RISK-OFF" | "RISK-ON";
+  mood: { sentiment: "PANIC" | "FEAR" | "NORMAL"; advice: string; stance: "DEFENSIVE" | "CAUTIOUS" | "NEUTRAL" };
+}> {
+  const isoDate = new Date().toISOString().slice(0, 10);
+
+  const [btc, vix, spx, dxy] = await Promise.all([
+    fetchYahooChart("BTC-USD"),
+    fetchYahooChart("^VIX"),
+    fetchYahooChart("^GSPC"),
+    fetchYahooChart("DX-Y.NYB"),
+  ]);
+
   const btcPrice = btc.closes[btc.closes.length - 1] || 0;
   const rsiD = rsi14(btc.closes);
-  const wCloses = weeklyCloses(btc.timestamps, btc.closes);
-  const rsiW = rsi14(wCloses);
+  const rsiW = rsi14(weeklyCloses(btc.timestamps, btc.closes));
   const s30 = sharpe30d(btc.closes);
   const d20 = sma(btc.closes, 20);
   const d200 = sma(btc.closes, 200);
+  const atr = atr14(btc.highs, btc.lows, btc.closes);
+  const atrPct = btcPrice ? (atr / btcPrice) * 100 : 0;
+  const hi60 = Math.max(...btc.closes.slice(-60));
 
-  const rules: Array<{ name: string; ok: boolean }> = [
-    { name: "RSI(日) <= 40", ok: rsiD <= 40 },
-    { name: "RSI(週) >= 45", ok: rsiW >= 45 },
-    { name: "站上 20MA", ok: btcPrice >= d20 },
-    { name: "站上 200MA", ok: btcPrice >= d200 },
-    { name: "30D Sharpe > 0", ok: s30 > 0 },
-    { name: "回撤 < 20%", ok: (() => { const hi = Math.max(...btc.closes.slice(-60)); return hi ? (btcPrice / hi - 1) > -0.2 : true; })() },
-    { name: "波動(ATR%) < 6%", ok: (() => { const atr = atr14(btc.highs, btc.lows, btc.closes); return btcPrice ? (atr / btcPrice) * 100 < 6 : true; })() },
-  ];
-  const met = rules.filter((r) => r.ok).length;
-  const signal = met >= 5 ? "買入" : met >= 4 ? "偏買" : met >= 3 ? "觀望" : "避險";
-  const pos = met >= 5 ? "5–10%" : met >= 4 ? "2–5%" : "0–2%";
-
-  const vix = await fetchYahooChart("^VIX");
-  const spx = await fetchYahooChart("^GSPC");
-  const gold = await fetchYahooChart("GC=F");
-  const wti = await fetchYahooChart("CL=F");
-  const dxy = await fetchYahooChart("DX-Y.NYB");
+  const btcMet = [
+    rsiD <= 40,
+    rsiW >= 45,
+    btcPrice >= d20,
+    btcPrice >= d200,
+    s30 > 0,
+    hi60 ? btcPrice / hi60 - 1 > -0.2 : true,
+    atrPct < 6,
+  ].filter(Boolean).length;
+  const btcSignal = btcMet >= 5 ? "買入" : btcMet >= 4 ? "偏買" : btcMet >= 3 ? "觀望" : "避險";
+  const btcPos = btcMet >= 5 ? "5–10%" : btcMet >= 4 ? "2–5%" : "0–2%";
 
   const pVix = vix.closes[vix.closes.length - 1] || 0;
   const pSpx = spx.closes[spx.closes.length - 1] || 0;
-  const pGold = gold.closes[gold.closes.length - 1] || 0;
-  const pWti = wti.closes[wti.closes.length - 1] || 0;
   const pDxy = dxy.closes[dxy.closes.length - 1] || 0;
 
   const chg = (series: ChartData) => {
@@ -402,13 +429,91 @@ async function formatMacroDashboard(profile: { risk: RiskTolerance; horizon: Hor
     const prev = pickBack(series.closes, 1);
     return computePctChange(last, prev);
   };
-
-  const hyOas = await fetchFredLatest("BAMLH0A0HYM2");
-  const igOas = await fetchFredLatest("BAMLC0A0CM");
-  const sofr = await fetchFredLatest("SOFR");
+  const vixChgPct = chg(vix);
+  const spxChgPct = chg(spx);
+  const dxyChgPct = chg(dxy);
 
   const year = new Date().getUTCFullYear();
-  const yc = (await fetchTreasuryYieldCurveLastTwo(year)) || (await fetchTreasuryYieldCurveLastTwo(year - 1));
+  const [hyOas, yc] = await Promise.all([
+    fetchFredLatest("BAMLH0A0HYM2"),
+    (async () => (await fetchTreasuryYieldCurveLastTwo(year)) || (await fetchTreasuryYieldCurveLastTwo(year - 1)))(),
+  ]);
+
+  const us10y = yc ? yc.latest.y10 : null;
+  const us10yChgBps = yc ? (yc.latest.y10 - yc.prev.y10) * 100 : null;
+  const regime = pVix >= 20 || (hyOas != null && hyOas >= 4.0) ? "RISK-OFF" : "RISK-ON";
+  const mood = sentimentFromVix(pVix);
+
+  const lines = formatMorningLines({
+    isoDate,
+    sentiment: mood.sentiment,
+    advice: mood.advice,
+    stance: mood.stance,
+    regime,
+    vix: pVix,
+    vixChgPct,
+    spx: pSpx,
+    spxChgPct,
+    dxy: pDxy,
+    dxyChgPct,
+    hyOas,
+    us10y,
+    us10yChgBps,
+    btcSignal,
+    btcPos,
+    btcPrice,
+    btcScore: `${btcMet}/7`,
+  });
+
+  const asOfUnix = Math.max(btc.asOfUnix || 0, vix.asOfUnix || 0, spx.asOfUnix || 0, dxy.asOfUnix || 0);
+
+  return {
+    isoDate,
+    asOfUnix,
+    lines,
+    btcPrice,
+    btcSignal,
+    btcPos,
+    btcMet,
+    rsiD,
+    rsiW,
+    s30,
+    vix,
+    spx,
+    dxy,
+    pVix,
+    pSpx,
+    pDxy,
+    vixChgPct,
+    spxChgPct,
+    dxyChgPct,
+    hyOas,
+    yc,
+    us10y,
+    us10yChgBps,
+    regime,
+    mood,
+  };
+}
+
+async function formatMacroDashboard(profile: { risk: RiskTolerance; horizon: Horizon }): Promise<string> {
+  const morningCtx = await buildMorningContext(profile);
+
+  const [gold, wti, igOas, sofr] = await Promise.all([
+    fetchYahooChart("GC=F"),
+    fetchYahooChart("CL=F"),
+    fetchFredLatest("BAMLC0A0CM"),
+    fetchFredLatest("SOFR"),
+  ]);
+
+  const pGold = gold.closes[gold.closes.length - 1] || 0;
+  const pWti = wti.closes[wti.closes.length - 1] || 0;
+
+  const chg = (series: ChartData) => {
+    const last = series.closes[series.closes.length - 1] || 0;
+    const prev = pickBack(series.closes, 1);
+    return computePctChange(last, prev);
+  };
 
   const walcl = await fetchFredLatest("WALCL");
   const rrp = await fetchFredLatest("RRPONTSYD");
@@ -416,63 +521,39 @@ async function formatMacroDashboard(profile: { risk: RiskTolerance; horizon: Hor
   const netLiquidity =
     walcl != null && rrp != null && tga != null ? walcl - rrp - tga : null;
 
-  const regime = pVix >= 20 || (hyOas != null && hyOas >= 4.0) ? "RISK-OFF" : "RISK-ON";
+  const regime = morningCtx.regime;
   const liquidityStatus =
     netLiquidity != null && sofr != null && sofr < 6 ? "正常" : "偏緊";
 
-  const mood = sentimentFromVix(pVix);
-  const us10y = yc ? yc.latest.y10 : null;
-  const us10yChgBps = yc ? (yc.latest.y10 - yc.prev.y10) * 100 : null;
-  const morning = formatMorningLines({
-    isoDate: new Date().toISOString().slice(0, 10),
-    sentiment: mood.sentiment,
-    advice: mood.advice,
-    stance: mood.stance,
-    regime,
-    vix: pVix,
-    vixChgPct: chg(vix),
-    spx: pSpx,
-    spxChgPct: chg(spx),
-    dxy: pDxy,
-    dxyChgPct: chg(dxy),
-    hyOas,
-    us10y,
-    us10yChgBps,
-    btcSignal: signal,
-    btcPos: pos,
-    btcPrice,
-    btcScore: `${met}/7`,
-  });
-
   const parts: string[] = [];
-  parts.push(...morning);
+  parts.push(...morningCtx.lines);
   parts.push("");
   parts.push("🌍 全球宏觀儀表板 (Macro)");
   parts.push("");
   parts.push("🧡 比特幣 (BTC) 分析");
-  parts.push(`- 訊號: ${signal}`);
-  parts.push(`- 建議倉位: ${pos}`);
-  parts.push(`- 現價: ${btcPrice.toFixed(0)} USD`);
-  parts.push(`- RSI(日): ${rsiD.toFixed(1)} | RSI(週): ${rsiW.toFixed(1)}`);
-  parts.push(`- 30D Sharpe: ${s30.toFixed(2)}`);
-  parts.push(`- 分數: ${met}/7`);
+  parts.push(`- 訊號: ${morningCtx.btcSignal}`);
+  parts.push(`- 建議倉位: ${morningCtx.btcPos}`);
+  parts.push(`- 現價: ${morningCtx.btcPrice.toFixed(0)} USD`);
+  parts.push(`- RSI(日): ${morningCtx.rsiD.toFixed(1)} | RSI(週): ${morningCtx.rsiW.toFixed(1)}`);
+  parts.push(`- 30D Sharpe: ${morningCtx.s30.toFixed(2)}`);
+  parts.push(`- 分數: ${morningCtx.btcMet}/7`);
   parts.push("");
   parts.push("🌐 全球 Macro 看板");
   parts.push(`- Regime: ${regime}`);
-  parts.push(`- VIX: ${pVix.toFixed(2)} (${fmtPct(chg(vix))})`);
-  parts.push(`- S&P 500: ${pSpx.toFixed(0)} (${fmtPct(chg(spx))})`);
+  parts.push(`- VIX: ${morningCtx.pVix.toFixed(2)} (${fmtPct(morningCtx.vixChgPct)})`);
+  parts.push(`- S&P 500: ${morningCtx.pSpx.toFixed(0)} (${fmtPct(morningCtx.spxChgPct)})`);
   parts.push(`- Gold (GC=F): ${pGold.toFixed(2)} (${fmtPct(chg(gold))})`);
   parts.push(`- WTI (CL=F): ${pWti.toFixed(2)} (${fmtPct(chg(wti))})`);
-  if (hyOas != null) parts.push(`- HY OAS: ${hyOas.toFixed(2)}% (${Math.round(hyOas * 100)} bps)`);
+  if (morningCtx.hyOas != null) parts.push(`- HY OAS: ${morningCtx.hyOas.toFixed(2)}% (${Math.round(morningCtx.hyOas * 100)} bps)`);
   if (igOas != null) parts.push(`- IG OAS: ${igOas.toFixed(2)}% (${Math.round(igOas * 100)} bps)`);
-  parts.push(`- DXY: ${pDxy.toFixed(2)} (${fmtPct(chg(dxy))})`);
-  if (yc) {
-    const d2 = (yc.latest.y2 - yc.prev.y2) * 100;
-    const d10 = (yc.latest.y10 - yc.prev.y10) * 100;
-    const d30 = (yc.latest.y30 - yc.prev.y30) * 100;
-    parts.push(`- US 2Y: ${yc.latest.y2.toFixed(2)}% (${d2 >= 0 ? "+" : ""}${d2.toFixed(0)} bps)`);
-    parts.push(`- US 10Y: ${yc.latest.y10.toFixed(2)}% (${d10 >= 0 ? "+" : ""}${d10.toFixed(0)} bps)`);
-    parts.push(`- US 30Y: ${yc.latest.y30.toFixed(2)}% (${d30 >= 0 ? "+" : ""}${d30.toFixed(0)} bps)`);
+  parts.push(`- DXY: ${morningCtx.pDxy.toFixed(2)} (${fmtPct(morningCtx.dxyChgPct)})`);
+  if (morningCtx.yc) {
+    const d2 = (morningCtx.yc.latest.y2 - morningCtx.yc.prev.y2) * 100;
+    const d10 = (morningCtx.yc.latest.y10 - morningCtx.yc.prev.y10) * 100;
+    const d30 = (morningCtx.yc.latest.y30 - morningCtx.yc.prev.y30) * 100;
+    parts.push(`- US 2Y: ${morningCtx.yc.latest.y2.toFixed(2)}% (${d2 >= 0 ? "+" : ""}${d2.toFixed(0)} bps)`);
+    parts.push(`- US 10Y: ${morningCtx.yc.latest.y10.toFixed(2)}% (${d10 >= 0 ? "+" : ""}${d10.toFixed(0)} bps)`);
+    parts.push(`- US 30Y: ${morningCtx.yc.latest.y30.toFixed(2)}% (${d30 >= 0 ? "+" : ""}${d30.toFixed(0)} bps)`);
   } else {
     const us2y = await fetchFredLastTwo("DGS2");
     const us10y = await fetchFredLastTwo("DGS10");
@@ -1382,74 +1463,8 @@ async function handle(chatId: number, text: string, env: Env): Promise<string> {
   }
 
   if (cmd === "morning") {
-    const btc = await fetchYahooChart("BTC-USD");
-    const btcPrice = btc.closes[btc.closes.length - 1] || 0;
-    const rsiD = rsi14(btc.closes);
-    const rsiW = rsi14(weeklyCloses(btc.timestamps, btc.closes));
-    const s30 = sharpe30d(btc.closes);
-    const d20 = sma(btc.closes, 20);
-    const d200 = sma(btc.closes, 200);
-    const atr = atr14(btc.highs, btc.lows, btc.closes);
-    const atrPct = btcPrice ? (atr / btcPrice) * 100 : 0;
-
-    const met = [
-      rsiD <= 40,
-      rsiW >= 45,
-      btcPrice >= d20,
-      btcPrice >= d200,
-      s30 > 0,
-      (() => {
-        const hi = Math.max(...btc.closes.slice(-60));
-        return hi ? btcPrice / hi - 1 > -0.2 : true;
-      })(),
-      atrPct < 6,
-    ].filter(Boolean).length;
-    const btcSignal = met >= 5 ? "買入" : met >= 4 ? "偏買" : met >= 3 ? "觀望" : "避險";
-    const btcPos = met >= 5 ? "5–10%" : met >= 4 ? "2–5%" : "0–2%";
-
-    const vix = await fetchYahooChart("^VIX");
-    const spx = await fetchYahooChart("^GSPC");
-    const dxy = await fetchYahooChart("DX-Y.NYB");
-    const pVix = vix.closes[vix.closes.length - 1] || 0;
-    const pSpx = spx.closes[spx.closes.length - 1] || 0;
-    const pDxy = dxy.closes[dxy.closes.length - 1] || 0;
-    const hyOas = await fetchFredLatest("BAMLH0A0HYM2");
-    const year = new Date().getUTCFullYear();
-    const yc = (await fetchTreasuryYieldCurveLastTwo(year)) || (await fetchTreasuryYieldCurveLastTwo(year - 1));
-    const us10y = yc ? yc.latest.y10 : null;
-    const us10yChgBps = yc ? (yc.latest.y10 - yc.prev.y10) * 100 : null;
-    const regime = pVix >= 20 || (hyOas != null && hyOas >= 4.0) ? "RISK-OFF" : "RISK-ON";
-    const mood = sentimentFromVix(pVix);
-
-    const chg = (series: ChartData) => {
-      const last = series.closes[series.closes.length - 1] || 0;
-      const prev = pickBack(series.closes, 1);
-      return computePctChange(last, prev);
-    };
-
-    const lines = formatMorningLines({
-      isoDate: new Date().toISOString().slice(0, 10),
-      sentiment: mood.sentiment,
-      advice: mood.advice,
-      stance: mood.stance,
-      regime,
-      vix: pVix,
-      vixChgPct: chg(vix),
-      spx: pSpx,
-      spxChgPct: chg(spx),
-      dxy: pDxy,
-      dxyChgPct: chg(dxy),
-      hyOas,
-      us10y,
-      us10yChgBps,
-      btcSignal,
-      btcPos,
-      btcPrice,
-      btcScore: `${met}/7`,
-    });
-    lines.push("");
-    lines.push(formatFooter(profile, Math.max(btc.asOfUnix || 0, vix.asOfUnix || 0, spx.asOfUnix || 0, dxy.asOfUnix || 0)));
-    return lines.join("\n");
+    const morningCtx = await buildMorningContext(profile);
+    return [...morningCtx.lines, "", formatFooter(profile, morningCtx.asOfUnix)].join("\n");
   }
 
   if (cmd === "action") {
