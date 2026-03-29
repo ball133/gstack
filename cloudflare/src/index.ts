@@ -663,7 +663,16 @@ async function fetchYahooQuoteSummary(symbol: string): Promise<{
   }
 
   const out = { trailingPE, forwardPE, epsForward, epsTrailing12Months: epsTTM, growthPct };
-  await caches.default.put(cacheKey, new Response(JSON.stringify(out), { headers: { "cache-control": "max-age=300" } }));
+  const hasAny =
+    out.trailingPE != null ||
+    out.forwardPE != null ||
+    out.epsForward != null ||
+    out.epsTrailing12Months != null ||
+    out.growthPct != null;
+  await caches.default.put(
+    cacheKey,
+    new Response(JSON.stringify(out), { headers: { "cache-control": `max-age=${hasAny ? 300 : 30}` } }),
+  );
   return out;
 }
 
@@ -1778,8 +1787,11 @@ async function handle(chatId: number, text: string, env: Env): Promise<string> {
       const year = new Date().getUTCFullYear();
       const yc = (await fetchTreasuryYieldCurveLastTwo(year)) || (await fetchTreasuryYieldCurveLastTwo(year - 1));
       const us10y = yc ? yc.latest.y10 : null;
-      const pe = f.trailingPE;
-      const fpe = f.forwardPE;
+      const lastPrice = data.closes[data.closes.length - 1] || 0;
+      const peCalc = f.epsTrailing12Months != null && f.epsTrailing12Months > 0 ? lastPrice / f.epsTrailing12Months : null;
+      const fpeCalc = f.epsForward != null && f.epsForward > 0 ? lastPrice / f.epsForward : null;
+      const pe = f.trailingPE ?? peCalc;
+      const fpe = f.forwardPE ?? fpeCalc;
       const usedForward = fpe != null && fpe > 0;
       const ey = usedForward ? (100 / (fpe as number)) : pe != null && pe > 0 ? (100 / pe) : null;
       const spread = ey != null && us10y != null ? ey - us10y : null;
@@ -1794,8 +1806,9 @@ async function handle(chatId: number, text: string, env: Env): Promise<string> {
       const lines: string[] = [];
       lines.push("");
       lines.push("估值 (Valuation)");
-      lines.push(`- P/E (TTM): ${pe != null ? pe.toFixed(2) : "N/A"}`);
-      lines.push(`- Forward P/E: ${fpe != null ? fpe.toFixed(2) : "N/A"}`);
+      lines.push(`- EPS (TTM): ${f.epsTrailing12Months != null ? f.epsTrailing12Months.toFixed(2) : "N/A"} | EPS (Fwd): ${f.epsForward != null ? f.epsForward.toFixed(2) : "N/A"}`);
+      lines.push(`- P/E (TTM): ${pe != null ? pe.toFixed(2) : "N/A"}${f.trailingPE == null && peCalc != null ? " (calc)" : ""}`);
+      lines.push(`- Forward P/E: ${fpe != null ? fpe.toFixed(2) : "N/A"}${f.forwardPE == null && fpeCalc != null ? " (calc)" : ""}`);
       if (growthPct != null) lines.push(`- Growth (YoY): ${growthPct.toFixed(1)}%`);
       if (peg != null) lines.push(`- PEG (Fwd): ${peg.toFixed(2)}`);
       if (fairPE != null) lines.push(`- Fair P/E (heuristic): ${fairPE.toFixed(1)}`);
