@@ -147,6 +147,8 @@ async function handleMessage(chatId: number, text: string): Promise<void> {
         "- `/summary NVDA` (brief only)",
         "- `/watch NVDA,AAPL,TSLA` (watchlist scan)",
         "- `/portfolio` (uses `portfolio.json`)",
+        "",
+        "- Profile (env): `GSTOCK_RISK=low|medium|high`, `GSTOCK_HORIZON=day|swing|invest`",
       ].join("\n"),
     );
     return;

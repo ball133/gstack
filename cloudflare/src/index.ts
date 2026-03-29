@@ -5,6 +5,8 @@ type Env = {
   TELEGRAM_CHAT_ID?: string;
   WEBHOOK_SECRET?: string;
   PORTFOLIO?: string;
+  RISK?: string;
+  HORIZON?: string;
 };
 
 type TelegramUpdate = {
@@ -99,6 +101,8 @@ type ChartData = {
   lows: number[];
   volumes: number[];
   currency: string;
+  timestamps: number[];
+  asOfUnix: number;
 };
 
 async function fetchYahooChart(symbol: string): Promise<ChartData> {
@@ -112,7 +116,12 @@ async function fetchYahooChart(symbol: string): Promise<ChartData> {
   const highs = (q.high || []).filter((x: any) => x != null).map((x: any) => Number(x));
   const lows = (q.low || []).filter((x: any) => x != null).map((x: any) => Number(x));
   const volumes = (q.volume || []).filter((x: any) => x != null).map((x: any) => Number(x));
-  return { closes, highs, lows, volumes, currency: r.meta?.currency || "USD" };
+  const timestamps = (r.timestamp || []).filter((x: any) => x != null).map((x: any) => Number(x));
+  const asOfUnix =
+    (r.meta?.regularMarketTime != null ? Number(r.meta.regularMarketTime) : 0) ||
+    (timestamps.length ? timestamps[timestamps.length - 1] : 0) ||
+    Math.floor(Date.now() / 1000);
+  return { closes, highs, lows, volumes, timestamps, asOfUnix, currency: r.meta?.currency || "USD" };
 }
 
 function sma(values: number[], period: number): number {
@@ -189,23 +198,88 @@ function macdHistogram(values: number[]): number {
 
 type Bias = "Bullish" | "Neutral" | "Bearish";
 
-function computeBias(price: number, d20: number, d200: number, hist: number, rsi: number): { bias: Bias; confidence: number } {
+type RiskTolerance = "low" | "medium" | "high";
+type Horizon = "day" | "swing" | "invest";
+
+function normalizeRisk(raw: string | undefined): RiskTolerance {
+  const v = (raw || "").trim().toLowerCase();
+  if (v === "low" || v === "l") return "low";
+  if (v === "high" || v === "h") return "high";
+  return "medium";
+}
+
+function normalizeHorizon(raw: string | undefined): Horizon {
+  const v = (raw || "").trim().toLowerCase();
+  if (v === "day" || v === "d" || v === "intraday") return "day";
+  if (v === "invest" || v === "i" || v === "long") return "invest";
+  return "swing";
+}
+
+function getProfile(env: Env): { risk: RiskTolerance; horizon: Horizon } {
+  return { risk: normalizeRisk(env.RISK), horizon: normalizeHorizon(env.HORIZON) };
+}
+
+function formatFooter(profile: { risk: RiskTolerance; horizon: Horizon }, asOfUnix: number): string {
+  const asOfIso = asOfUnix ? new Date(asOfUnix * 1000).toISOString() : "-";
+  const generatedIso = new Date().toISOString();
+  return [
+    "Data: Yahoo Finance chart v8",
+    "Daily: 1d/1y",
+    `As-of: ${asOfIso}`,
+    `Generated: ${generatedIso}`,
+    `Profile: risk=${profile.risk} horizon=${profile.horizon}`,
+  ].join(" | ");
+}
+
+function computeBias(
+  price: number,
+  d20: number,
+  d200: number,
+  hist: number,
+  rsi: number,
+  profile: { risk: RiskTolerance; horizon: Horizon },
+): { bias: Bias; confidence: number } {
   const above20 = price > d20;
   const above200 = price > d200;
   const macdBull = hist > 0;
   const macdBear = hist < 0;
+
+  const horizonWeights =
+    profile.horizon === "day"
+      ? { above20: 15, above200: 5, macd: 15, rsi: 5 }
+      : profile.horizon === "invest"
+        ? { above20: 5, above200: 20, macd: 5, rsi: 5 }
+        : { above20: 10, above200: 10, macd: 10, rsi: 10 };
+
   let confidence = 50;
-  if (above20) confidence += 10;
-  else confidence -= 10;
-  if (above200) confidence += 10;
-  else confidence -= 10;
-  if (macdBull) confidence += 10;
-  if (macdBear) confidence -= 10;
-  if (rsi >= 40 && rsi <= 70) confidence += 5;
-  if (rsi < 30 || rsi > 70) confidence -= 5;
+  if (above20) confidence += horizonWeights.above20;
+  else confidence -= horizonWeights.above20;
+  if (above200) confidence += horizonWeights.above200;
+  else confidence -= horizonWeights.above200;
+  if (macdBull) confidence += horizonWeights.macd;
+  if (macdBear) confidence -= horizonWeights.macd;
+  if (rsi >= 40 && rsi <= 70) confidence += horizonWeights.rsi;
+  if (rsi < 30 || rsi > 70) confidence -= horizonWeights.rsi;
+  if (profile.risk === "low") confidence -= 10;
+  if (profile.risk === "high") confidence += 5;
   confidence = Math.max(0, Math.min(100, confidence));
-  if (above20 && above200 && macdBull) return { bias: "Bullish", confidence };
-  if (!above20 && !above200 && macdBear) return { bias: "Bearish", confidence };
+
+  const bullish =
+    profile.risk === "low"
+      ? above200 && above20 && macdBull && rsi >= 45 && rsi <= 70
+      : profile.risk === "high"
+        ? above20 && macdBull && rsi >= 35
+        : above20 && above200 && macdBull;
+
+  const bearish =
+    profile.risk === "low"
+      ? !above200 && !above20 && macdBear && rsi <= 55
+      : profile.risk === "high"
+        ? !above20 && macdBear
+        : !above20 && !above200 && macdBear;
+
+  if (bullish) return { bias: "Bullish", confidence };
+  if (bearish) return { bias: "Bearish", confidence };
   return { bias: "Neutral", confidence };
 }
 
@@ -243,14 +317,14 @@ function computeInvalidation(bias: Bias, d20: number, r1: number, s1: number): n
   return d20;
 }
 
-function formatBrief(symbol: string, data: ChartData): string {
+function formatBrief(symbol: string, data: ChartData, profile: { risk: RiskTolerance; horizon: Horizon }): string {
   const price = data.closes[data.closes.length - 1] || 0;
   const d20 = sma(data.closes, 20);
   const d200 = sma(data.closes, 200);
   const rsi = rsi14(data.closes);
   const atr = atr14(data.highs, data.lows, data.closes);
   const hist = macdHistogram(data.closes);
-  const { bias, confidence } = computeBias(price, d20, d200, hist, rsi);
+  const { bias, confidence } = computeBias(price, d20, d200, hist, rsi, profile);
   const { r1, s1 } = pivotsFromPreviousDay(data.highs, data.lows, data.closes);
   const invalidation = computeInvalidation(bias, d20, r1, s1);
 
@@ -264,7 +338,7 @@ function formatBrief(symbol: string, data: ChartData): string {
   return lines.join("\n");
 }
 
-function formatFull(symbol: string, data: ChartData): string {
+function formatFull(symbol: string, data: ChartData, profile: { risk: RiskTolerance; horizon: Horizon }): string {
   const price = data.closes[data.closes.length - 1] || 0;
   const d20 = sma(data.closes, 20);
   const d50 = sma(data.closes, 50);
@@ -274,7 +348,7 @@ function formatFull(symbol: string, data: ChartData): string {
   const atr = atr14(data.highs, data.lows, data.closes);
   const hist = macdHistogram(data.closes);
   const { p, r1, s1 } = pivotsFromPreviousDay(data.highs, data.lows, data.closes);
-  const { bias, confidence } = computeBias(price, d20, d200, hist, rsi);
+  const { bias, confidence } = computeBias(price, d20, d200, hist, rsi, profile);
   const invalidation = computeInvalidation(bias, d20, r1, s1);
 
   const distToSupport = Math.abs(price - s1);
@@ -343,6 +417,7 @@ function formatFull(symbol: string, data: ChartData): string {
 }
 
 async function handle(chatId: number, text: string, env: Env): Promise<string> {
+  const profile = getProfile(env);
   const { cmd, arg } = parseCommand(text);
   if (cmd === "start" || cmd === "help") {
     return [
@@ -352,6 +427,8 @@ async function handle(chatId: number, text: string, env: Env): Promise<string> {
       "- `/summary NVDA`",
       "- `/watch NVDA,AAPL,TSLA`",
       "- `/portfolio`",
+      "",
+      "Profile (env vars): RISK=low|medium|high, HORIZON=day|swing|invest",
     ].join("\n");
   }
 
@@ -360,11 +437,14 @@ async function handle(chatId: number, text: string, env: Env): Promise<string> {
     if (!spec) return "PORTFOLIO not configured in worker env. Set PORTFOLIO like: NVDA,AAPL,0700.HK";
     const tickers = spec.split(",").map((s) => normalizeTicker(s)).filter(Boolean);
     const briefs: string[] = [];
+    let maxAsOf = 0;
     for (const t of tickers.slice(0, 12)) {
       const data = await fetchYahooChart(t);
-      briefs.push(formatBrief(t, data));
+      maxAsOf = Math.max(maxAsOf, data.asOfUnix || 0);
+      briefs.push(formatBrief(t, data, profile));
       briefs.push("");
     }
+    briefs.push(formatFooter(profile, maxAsOf));
     return briefs.join("\n");
   }
 
@@ -372,14 +452,16 @@ async function handle(chatId: number, text: string, env: Env): Promise<string> {
     if (!arg) return "Usage: /watch NVDA,AAPL,TSLA";
     const tickers = arg.split(",").map((s) => normalizeTicker(s)).filter(Boolean).slice(0, 20);
     const rows: Array<{ t: string; bias: Bias; conf: number; price: number; rsi: number }> = [];
+    let maxAsOf = 0;
     for (const t of tickers) {
       const data = await fetchYahooChart(t);
+      maxAsOf = Math.max(maxAsOf, data.asOfUnix || 0);
       const price = data.closes[data.closes.length - 1] || 0;
       const d20 = sma(data.closes, 20);
       const d200 = sma(data.closes, 200);
       const rsi = rsi14(data.closes);
       const hist = macdHistogram(data.closes);
-      const { bias, confidence } = computeBias(price, d20, d200, hist, rsi);
+      const { bias, confidence } = computeBias(price, d20, d200, hist, rsi, profile);
       rows.push({ t, bias, conf: confidence, price, rsi });
     }
     rows.sort((a, b) => b.conf - a.conf);
@@ -387,6 +469,8 @@ async function handle(chatId: number, text: string, env: Env): Promise<string> {
     for (const r of rows) {
       lines.push(`${r.t}: ${r.bias} ${r.conf}% | ${r.price.toFixed(2)} | RSI ${r.rsi.toFixed(1)}`);
     }
+    lines.push("");
+    lines.push(formatFooter(profile, maxAsOf));
     return lines.join("\n");
   }
 
@@ -394,8 +478,8 @@ async function handle(chatId: number, text: string, env: Env): Promise<string> {
   if (!target) return "Send a ticker like NVDA, or /help";
   const ticker = normalizeTicker(target);
   const data = await fetchYahooChart(ticker);
-  if (cmd === "summary") return formatBrief(ticker, data);
-  return formatFull(ticker, data);
+  const body = cmd === "summary" ? formatBrief(ticker, data, profile) : formatFull(ticker, data, profile);
+  return body + "\n\n" + formatFooter(profile, data.asOfUnix);
 }
 
 export default {

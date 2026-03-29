@@ -18,6 +18,9 @@ const BROWSE_BIN = join(__dirname, "browse", "dist", "browse");
 
 type SentimentResult = { score: number; count: number };
 
+type RiskTolerance = "low" | "medium" | "high";
+type Horizon = "day" | "swing" | "invest";
+
 type CliOptions = {
   tickers: string[];
   full: boolean;
@@ -26,6 +29,8 @@ type CliOptions = {
   outPath?: string;
   mode?: "summary" | "full";
   noOpen?: boolean;
+  risk: RiskTolerance;
+  horizon: Horizon;
 };
 
 type Position = {
@@ -35,6 +40,20 @@ type Position = {
   costBasis?: number;
 };
 
+function normalizeRisk(raw: string | undefined): RiskTolerance {
+  const v = (raw || "").trim().toLowerCase();
+  if (v === "low" || v === "l") return "low";
+  if (v === "high" || v === "h") return "high";
+  return "medium";
+}
+
+function normalizeHorizon(raw: string | undefined): Horizon {
+  const v = (raw || "").trim().toLowerCase();
+  if (v === "day" || v === "d" || v === "intraday") return "day";
+  if (v === "invest" || v === "i" || v === "long") return "invest";
+  return "swing";
+}
+
 function parseArgs(argv: string[]): CliOptions {
   let full = false;
   let noNews = false;
@@ -43,6 +62,8 @@ function parseArgs(argv: string[]): CliOptions {
   let outPath: string | undefined;
   let mode: "summary" | "full" | undefined;
   let noOpen = false;
+  let risk: RiskTolerance = normalizeRisk(process.env.GSTOCK_RISK || process.env.RISK);
+  let horizon: Horizon = normalizeHorizon(process.env.GSTOCK_HORIZON || process.env.HORIZON);
 
   const args = [...argv];
   while (args.length > 0) {
@@ -66,6 +87,14 @@ function parseArgs(argv: string[]): CliOptions {
     }
     if (a === "--no-open") {
       noOpen = true;
+      continue;
+    }
+    if (a === "--risk") {
+      risk = normalizeRisk(args.shift());
+      continue;
+    }
+    if (a === "--horizon") {
+      horizon = normalizeHorizon(args.shift());
       continue;
     }
     if (a === "--watch" || a === "--watchlist" || a === "-w") {
@@ -98,6 +127,8 @@ function parseArgs(argv: string[]): CliOptions {
     outPath,
     mode,
     noOpen,
+    risk,
+    horizon,
   };
 }
 
@@ -186,8 +217,10 @@ function suggestAction(params: {
   weightPct: number;
   rrRatio: number;
   rsi: number;
+  risk: RiskTolerance;
+  horizon: Horizon;
 }): string {
-  const { flags, bias, weightPct, rrRatio, rsi } = params;
+  const { flags, bias, weightPct, rrRatio, rsi, risk, horizon } = params;
   const conc = flags.includes("CONC>=20%");
   const below20 = flags.includes("<20MA");
   const below200 = flags.includes("<200MA");
@@ -196,18 +229,58 @@ function suggestAction(params: {
   const lowRR = flags.includes("LOW_RR");
   const newsNA = flags.includes("NEWS_NA");
 
-  if (conc && (below20 || below200)) return "Reduce concentration; wait for trend reclaim";
-  if (bias === "Bearish" && conc) return "Reduce concentration / hedge";
-  if (lowRR && (below20 || below200)) return "Avoid adding; wait for better RR + reversal";
-  if (lowRR) return "Wait for better entry (RR)";
-  if (oversold && below200) return "Oversold in downtrend; add only on reversal";
-  if (oversold) return rrRatio >= 2 ? "Oversold; consider small scale-in (RR ok)" : "Oversold; wait (RR weak)";
-  if (overbought) return "Overbought; consider trim / tighten stop";
-  if (bias === "Bullish" && rrRatio >= 2 && weightPct < 20) return "Hold/add; use invalidation as stop";
-  if (bias === "Bullish") return "Hold; add only if RR improves";
-  if (bias === "Neutral" && rrRatio >= 2) return "Hold; watch breakout/confirm";
-  if (newsNA) return "Hold; ignore sentiment (no news data)";
-  return "Hold; monitor";
+  let action = "Hold; monitor";
+
+  if (conc && (below20 || below200)) action = "Reduce concentration; wait for trend reclaim";
+  else if (bias === "Bearish" && conc) action = "Reduce concentration / hedge";
+  else if (lowRR && (below20 || below200)) action = "Avoid adding; wait for better RR + reversal";
+  else if (lowRR) action = "Wait for better entry (RR)";
+  else if (oversold && below200) action = "Oversold in downtrend; add only on reversal";
+  else if (oversold) action = rrRatio >= 2 ? "Oversold; consider small scale-in (RR ok)" : "Oversold; wait (RR weak)";
+  else if (overbought) action = "Overbought; consider trim / tighten stop";
+  else if (bias === "Bullish" && rrRatio >= 2 && weightPct < 20) action = "Hold/add; use invalidation as stop";
+  else if (bias === "Bullish") action = "Hold; add only if RR improves";
+  else if (bias === "Neutral" && rrRatio >= 2) action = "Hold; watch breakout/confirm";
+  else if (newsNA) action = "Hold; ignore sentiment (no news data)";
+
+  if (risk === "low") {
+    if (action.includes("Hold/add")) action = "Hold; add only after confirmation; use invalidation as stop";
+    if (action.includes("scale-in")) action = "Oversold; wait for reversal confirmation";
+    if (action.includes("add only")) action = action.replace("add only", "add only (small) after");
+  } else if (risk === "high") {
+    if (action === "Hold; monitor") action = "Hold; trade around levels";
+    if (action.includes("Hold; watch breakout/confirm")) action = "Hold; consider breakout entry with tight stop";
+  }
+
+  if (horizon === "day") {
+    if (action.includes("use invalidation as stop")) action = action.replace("use invalidation as stop", "use invalidation as tight stop");
+    if (action === "Hold; trade around levels") action = "Trade around levels; keep stops tight";
+  } else if (horizon === "invest") {
+    if (action.includes("tighten stop")) action = action.replace("tighten stop", "review size; respect 200MA");
+    if (action.includes("use invalidation")) action = action.replace("use invalidation", "use invalidation / 200MA");
+  }
+
+  return action;
+}
+
+function formatTrustFooter(params: {
+  source: string;
+  dailySpec: string;
+  intradaySpec?: string;
+  asOfUnix: number;
+  options: CliOptions;
+}): string {
+  const asOfIso = params.asOfUnix ? new Date(params.asOfUnix * 1000).toISOString() : "-";
+  const generatedIso = new Date().toISOString();
+  const parts = [
+    `Data: ${params.source}`,
+    `Daily: ${params.dailySpec}`,
+    params.intradaySpec ? `Intraday: ${params.intradaySpec}` : "",
+    `As-of: ${asOfIso}`,
+    `Generated: ${generatedIso}`,
+    `Profile: risk=${params.options.risk} horizon=${params.options.horizon}`,
+  ].filter(Boolean);
+  return parts.join(" | ");
 }
 
 function parsePositionsSpec(spec: string): Position[] {
@@ -455,6 +528,8 @@ function computeBias(params: {
   macdHistogram: number;
   obvTrend: string;
   rsi: number;
+  risk: RiskTolerance;
+  horizon: Horizon;
 }): { bias: Bias; confidence: number } {
   const above20 = params.price > params.d20ma;
   const above200 = params.price > params.d200ma;
@@ -466,23 +541,47 @@ function computeBias(params: {
   const obvBear = params.obvTrend.includes("Distribution");
   const rsiOkBear = params.rsi <= 60;
 
-  let confidence = 50;
-  if (above20) confidence += 10;
-  if (above200) confidence += 10;
-  if (macdBull) confidence += 10;
-  if (obvBull) confidence += 10;
-  if (rsiOkBull) confidence += 10;
+  const horizonWeights =
+    params.horizon === "day"
+      ? { above20: 15, above200: 5, macd: 15, obv: 10, rsi: 5 }
+      : params.horizon === "invest"
+        ? { above20: 5, above200: 20, macd: 5, obv: 10, rsi: 5 }
+        : { above20: 10, above200: 10, macd: 10, obv: 10, rsi: 10 };
 
-  if (!above20) confidence -= 10;
-  if (!above200) confidence -= 10;
-  if (macdBear) confidence -= 10;
-  if (obvBear) confidence -= 10;
-  if (!rsiOkBear) confidence -= 5;
+  let confidence = 50;
+  if (above20) confidence += horizonWeights.above20;
+  if (above200) confidence += horizonWeights.above200;
+  if (macdBull) confidence += horizonWeights.macd;
+  if (obvBull) confidence += horizonWeights.obv;
+  if (rsiOkBull) confidence += horizonWeights.rsi;
+
+  if (!above20) confidence -= horizonWeights.above20;
+  if (!above200) confidence -= horizonWeights.above200;
+  if (macdBear) confidence -= horizonWeights.macd;
+  if (obvBear) confidence -= horizonWeights.obv;
+  if (!rsiOkBear) confidence -= Math.max(5, Math.round(horizonWeights.rsi / 2));
+
+  if (params.risk === "low") confidence -= 10;
+  if (params.risk === "high") confidence += 5;
 
   confidence = Math.max(0, Math.min(100, confidence));
 
-  if (above20 && macdBull && obvBull && rsiOkBull) return { bias: "Bullish", confidence };
-  if (!above20 && macdBear && obvBear) return { bias: "Bearish", confidence };
+  const bullish =
+    params.risk === "low"
+      ? above200 && above20 && macdBull && obvBull && rsiOkBull
+      : params.risk === "high"
+        ? above20 && (macdBull || obvBull) && params.rsi >= 35
+        : above20 && macdBull && obvBull && rsiOkBull;
+
+  const bearish =
+    params.risk === "low"
+      ? !above200 && !above20 && macdBear && obvBear
+      : params.risk === "high"
+        ? !above20 && (macdBear || obvBear)
+        : !above20 && macdBear && obvBear;
+
+  if (bullish) return { bias: "Bullish", confidence };
+  if (bearish) return { bias: "Bearish", confidence };
   return { bias: "Neutral", confidence };
 }
 
@@ -505,6 +604,7 @@ async function analyzeSymbol(symbol: string, options: CliOptions): Promise<{
   d200ma: number;
   currency: string;
   rsi: number;
+  asOfUnix: number;
 }> {
   try {
     const tickerName = symbol === "SPY" ? "標普 500 (SPY)" : symbol;
@@ -573,9 +673,20 @@ async function analyzeSymbol(symbol: string, options: CliOptions): Promise<{
       macdHistogram: histogram,
       obvTrend,
       rsi,
+      risk: options.risk,
+      horizon: options.horizon,
     });
 
     const invalidation = computeInvalidation(bias, { d20ma: d20MA, r1: pivots.r1, s1: pivots.s1 });
+    const asOfUnix =
+      daily.timestamps && daily.timestamps.length ? daily.timestamps[daily.timestamps.length - 1] : Math.floor(Date.now() / 1000);
+    const trustFooter = formatTrustFooter({
+      source: "Yahoo Finance chart v8",
+      dailySpec: "1d/1y",
+      intradaySpec: "1h/2mo",
+      asOfUnix,
+      options,
+    });
 
     const color = (c: number) => c > 70 ? "\x1b[32m" : c < 40 ? "\x1b[31m" : "\x1b[33m";
     const reset = "\x1b[0m";
@@ -634,7 +745,8 @@ async function analyzeSymbol(symbol: string, options: CliOptions): Promise<{
       console.log(`\n🧱 LONG-TERM STRUCTURE`);
       console.log(`  └ Daily 200MA: $${d200MA.toFixed(2)} (${p > d200MA ? "Bullish Phase" : "Bearish Phase"})`);
       console.log(`  └ Daily 20MA:  $${d20MA.toFixed(2)} (${p > d20MA ? "Short-term Strength" : "Short-term Weakness"})`);
-      console.log(`================================================\n`);
+      console.log(`================================================`);
+      console.log(trustFooter + "\n");
     } else if (!options.positionsSpec && options.tickers.length === 1) {
       const sentimentLabel = options.noNews ? "-" : sentiment.count === 0 ? "N/A" : `${sentiment.score}%`;
       console.log(`\n🎯 TRADING BRIEF: ${symbol}`);
@@ -644,6 +756,7 @@ async function analyzeSymbol(symbol: string, options: CliOptions): Promise<{
       console.log(
         `Price: $${p.toFixed(2)} | RR: ${rrRatio.toFixed(2)} | Daily20MA: $${d20MA.toFixed(2)} | Daily200MA: $${d200MA.toFixed(2)}`,
       );
+      console.log(trustFooter);
     }
 
     // Log the "Success" to analytics
@@ -663,6 +776,7 @@ async function analyzeSymbol(symbol: string, options: CliOptions): Promise<{
       d200ma: d200MA,
       currency: daily.currency || "USD",
       rsi,
+      asOfUnix,
     };
   } catch (e: any) {
     console.error(`\n❌ Analysis Failed: ${e.message}\n`);
@@ -679,6 +793,7 @@ async function analyzeSymbol(symbol: string, options: CliOptions): Promise<{
       d200ma: 0,
       currency: "USD",
       rsi: 50,
+      asOfUnix: 0,
     };
   }
 }
@@ -882,9 +997,22 @@ async function main() {
             weightPct: r.weightPct,
             rrRatio: r.rrRatio,
             rsi: r.rsi,
+            risk: options.risk,
+            horizon: options.horizon,
           }),
         }))
         .sort((a, b) => Number(b.MV) - Number(a.MV)),
+    );
+    const asOfUnix = Math.max(0, ...enriched.map((r) => r.asOfUnix || 0));
+    console.log(
+      "\n" +
+        formatTrustFooter({
+          source: "Yahoo Finance chart v8",
+          dailySpec: "1d/1y",
+          intradaySpec: "1h/2mo",
+          asOfUnix,
+          options,
+        }),
     );
 
     return;
@@ -923,6 +1051,17 @@ async function main() {
       Sentiment: options.noNews ? "-" : r.sentimentCount === 0 ? "N/A" : `${r.sentimentScore}%`,
       Invalidation: `$${r.invalidation.toFixed(2)}`,
     })),
+  );
+  const asOfUnix = Math.max(0, ...sorted.map((r) => r.asOfUnix || 0));
+  console.log(
+    "\n" +
+      formatTrustFooter({
+        source: "Yahoo Finance chart v8",
+        dailySpec: "1d/1y",
+        intradaySpec: "1h/2mo",
+        asOfUnix,
+        options,
+      }),
   );
   } finally {
     if (outPath) {
