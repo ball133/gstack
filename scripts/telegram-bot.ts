@@ -179,6 +179,31 @@ function extractBrief(stdout: string): string {
   return out.slice(0, 6).join("\n");
 }
 
+function extractPortfolioBrief(text: string): string {
+  const lines = text.split(/\r?\n/);
+  const clean = lines.map((l) => l.replace(/\s+$/g, ""));
+  const out: string[] = [];
+
+  const findSection = (needle: string) => clean.findIndex((l) => l.includes(needle));
+  const pushBlock = (startIdx: number, maxLines: number) => {
+    if (startIdx < 0) return;
+    for (let i = startIdx; i < clean.length && out.length < maxLines; i++) {
+      const s = clean[i];
+      out.push(s);
+      if (i > startIdx && s.trim() === "") break;
+    }
+  };
+
+  pushBlock(findSection("PORTFOLIO SUMMARY"), 18);
+  if (out.length) out.push("");
+  pushBlock(findSection("PORTFOLIO VERDICT"), 14);
+  if (out.length) out.push("");
+  const posIdx = findSection("PORTFOLIO POSITIONS");
+  if (posIdx >= 0) out.push("PORTFOLIO POSITIONS（請看附件完整表格）");
+
+  return out.map((l) => l.trimEnd()).join("\n").trim();
+}
+
 type MarkSixCache = { ts: number; text: string };
 const marksixCache = new Map<number, MarkSixCache>();
 const MARKSIX_CACHE_TTL_MS = 60_000;
@@ -525,6 +550,11 @@ async function handleMessage(chatId: number, text: string): Promise<void> {
       await sendMessage(chatId, `❌ Failed:\n\`\`\`\n${escapeMarkdown(cached.stderr || cached.stdout || "unknown error")}\n\`\`\``);
       return;
     }
+    try {
+      const fileText = (await readFile(cached.outPath)).toString();
+      const brief = extractPortfolioBrief(fileText);
+      if (brief) await sendMessage(chatId, `\`\`\`\n${escapeMarkdown(brief)}\n\`\`\``, { replyMarkup: buildInlineActions({}) });
+    } catch {}
     await sendDocument(chatId, cached.outPath, cached.hit ? "Portfolio summary (cached)" : "Portfolio summary");
     await sendMessage(chatId, "✅ Portfolio ready.", { replyMarkup: buildInlineActions({}) });
     return;

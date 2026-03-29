@@ -178,6 +178,17 @@ async function sendMessage(token: string, chatId: number, text: string, options?
   }
 }
 
+async function sendDocument(token: string, chatId: number, params: { filename: string; content: string; caption?: string }): Promise<void> {
+  const url = `https://api.telegram.org/bot${token}/sendDocument`;
+  const form = new FormData();
+  form.set("chat_id", String(chatId));
+  if (params.caption) form.set("caption", params.caption);
+  form.set("document", new Blob([params.content], { type: "text/plain; charset=utf-8" }), params.filename);
+  const res = await fetch(url, { method: "POST", body: form });
+  const json = await res.json<any>();
+  if (!json.ok) throw new Error(json.description || "Telegram sendDocument error");
+}
+
 function stateKey(chatId: number) {
   return new Request(`https://state.local/pending/${chatId}`);
 }
@@ -481,6 +492,8 @@ type Bias = "Bullish" | "Neutral" | "Bearish";
 type RiskTolerance = "low" | "medium" | "high";
 type Horizon = "day" | "swing" | "invest";
 
+type Position = { ticker: string; quantity: number; costBasis?: number };
+
 function biasLabelZh(b: Bias): string {
   if (b === "Bullish") return "偏多";
   if (b === "Bearish") return "偏空";
@@ -497,6 +510,29 @@ function horizonLabelZh(h: Horizon): string {
   if (h === "day") return "當沖";
   if (h === "invest") return "投資";
   return "波段";
+}
+
+function parsePositionsSpec(spec: string): Position[] {
+  const raw = spec.trim();
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const [lhs, rhsRaw] = part.split(":");
+      const rawTicker = (lhs || "").trim();
+      if (!rawTicker) return null;
+      const rhs = (rhsRaw || "").trim();
+      const m = rhs.match(/^(\d+(?:\.\d+)?)(?:@(\d+(?:\.\d+)?))?$/);
+      if (!m) return null;
+      const quantity = Number(m[1]);
+      const costBasis = m[2] != null ? Number(m[2]) : undefined;
+      if (!Number.isFinite(quantity) || quantity <= 0) return null;
+      if (costBasis != null && (!Number.isFinite(costBasis) || costBasis <= 0)) return null;
+      return { ticker: normalizeTicker(rawTicker), quantity, costBasis };
+    })
+    .filter((x): x is Position => Boolean(x));
 }
 
 function normalizeRisk(raw: string | undefined): RiskTolerance {
@@ -805,7 +841,104 @@ async function handle(chatId: number, text: string, env: Env): Promise<string> {
 
   if (cmd === "portfolio") {
     const spec = (arg || (env.PORTFOLIO || "").trim()).trim();
-    if (!spec) return "未設定 PORTFOLIO。請輸入：/portfolio NVDA,AAPL,0700.HK（或在 Worker env 設定 PORTFOLIO）";
+    if (!spec) {
+      return "尚未設定投資組合。\n請輸入：/portfolio NVDA,AAPL,0700.HK\n或含數量成本：/portfolio NVDA:15@167.52,0700.HK:100@493.4\n（或在 Worker env 設定 PORTFOLIO）";
+    }
+
+    if (spec.includes(":")) {
+      const positions = parsePositionsSpec(spec).slice(0, 25);
+      if (positions.length === 0) {
+        return "格式錯誤。範例：/portfolio NVDA:15@167.52,0700.HK:100@493.4";
+      }
+
+      const rows: Array<{
+        ticker: string;
+        qty: number;
+        cost?: number;
+        price: number;
+        mv: number;
+        ccy: string;
+        pnlPct?: number;
+        bias: Bias;
+        conf: number;
+        rsi: number;
+        inval: number;
+        asOfUnix: number;
+      }> = [];
+
+      let maxAsOf = 0;
+      for (const p of positions) {
+        const data = await fetchYahooChart(p.ticker);
+        maxAsOf = Math.max(maxAsOf, data.asOfUnix || 0);
+        const price = data.closes[data.closes.length - 1] || 0;
+        const mv = price * p.quantity;
+        const d20 = sma(data.closes, 20);
+        const d200 = sma(data.closes, 200);
+        const rsi = rsi14(data.closes);
+        const hist = macdHistogram(data.closes);
+        const { r1, s1 } = pivotsFromPreviousDay(data.highs, data.lows, data.closes);
+        const { bias, confidence } = computeBias(price, d20, d200, hist, rsi, profile);
+        const inval = computeInvalidation(bias, d20, r1, s1);
+        const pnlPct =
+          p.costBasis != null && p.costBasis > 0 ? ((price - p.costBasis) / p.costBasis) * 100 : undefined;
+        rows.push({
+          ticker: p.ticker,
+          qty: p.quantity,
+          cost: p.costBasis,
+          price,
+          mv,
+          ccy: data.currency,
+          pnlPct,
+          bias,
+          conf: confidence,
+          rsi,
+          inval,
+          asOfUnix: data.asOfUnix,
+        });
+      }
+
+      const totalsByCcy = new Map<string, number>();
+      for (const r of rows) totalsByCcy.set(r.ccy, (totalsByCcy.get(r.ccy) || 0) + r.mv);
+
+      const fmtPct = (x: number) => `${x >= 0 ? "+" : ""}${x.toFixed(2)}%`;
+      const lines: string[] = [];
+      lines.push("📌 投資組合摘要（含持倉/成本）");
+      lines.push("");
+      lines.push("🧾 PORTFOLIO SUMMARY（按幣別，不換匯）");
+      for (const [ccy, mv] of Array.from(totalsByCcy.entries()).sort((a, b) => b[1] - a[1])) {
+        lines.push(`- ${ccy}: ${mv.toFixed(2)}`);
+      }
+      lines.push("");
+      lines.push("📋 PORTFOLIO POSITIONS");
+
+      const rowsByCcy = new Map<string, typeof rows>();
+      for (const r of rows) {
+        const arr = rowsByCcy.get(r.ccy) || [];
+        arr.push(r);
+        rowsByCcy.set(r.ccy, arr);
+      }
+
+      for (const ccy of Array.from(rowsByCcy.keys()).sort((a, b) => a.localeCompare(b))) {
+        const group = (rowsByCcy.get(ccy) || []).sort((a, b) => b.mv - a.mv);
+        const totalMv = totalsByCcy.get(ccy) || 1;
+        lines.push("");
+        lines.push(`幣別: ${ccy}`);
+        lines.push("Ticker | Qty | Cost | Price | MV | Weight | PnL% | Bias | Conf | RSI | Inval");
+        for (const r of group) {
+          const w = (r.mv / totalMv) * 100;
+          const cost = r.cost != null ? r.cost.toFixed(2) : "-";
+          const pnl = r.pnlPct != null ? fmtPct(r.pnlPct) : "-";
+          lines.push(
+            `${r.ticker} | ${r.qty} | ${cost} | ${r.price.toFixed(2)} | ${r.mv.toFixed(2)} | ${w.toFixed(1)}% | ${pnl} | ${biasLabelZh(r.bias)} | ${r.conf}% | ${r.rsi.toFixed(1)} | ${r.inval.toFixed(2)}`,
+          );
+        }
+      }
+
+      lines.push("");
+      lines.push(formatFooter(profile, maxAsOf));
+      return lines.join("\n");
+    }
+
     const tickers = spec.split(",").map((s) => normalizeTicker(s)).filter(Boolean);
     const briefs: string[] = [];
     let maxAsOf = 0;
@@ -1055,8 +1188,16 @@ export default {
         : !text.startsWith("/") ? text : "";
       const tickerForButtons = tickerForButtonsRaw.includes(",") ? tickerForButtonsRaw.split(",")[0] : tickerForButtonsRaw;
       const replyMarkup = tickerForButtons ? buildInlineActions(normalizeTicker(tickerForButtons)) : undefined;
-      if (text === "/help" || text === "/start") ctx.waitUntil(sendMessage(token, chatId, body, { replyMarkup: buildHelpMenu() }));
-      else ctx.waitUntil(sendMessage(token, chatId, body, replyMarkup ? { replyMarkup } : undefined));
+      if (text.startsWith("/portfolio")) {
+        const preview = body.split("\n").slice(0, 26).join("\n") + "\n\n（完整報告已輸出附件檔）";
+        ctx.waitUntil(sendMessage(token, chatId, preview, { replyMarkup: buildHelpMenu() }));
+        const filename = `portfolio_${new Date().toISOString().slice(0, 10)}.txt`;
+        ctx.waitUntil(sendDocument(token, chatId, { filename, content: body, caption: "Portfolio report" }));
+      } else if (text === "/help" || text === "/start") {
+        ctx.waitUntil(sendMessage(token, chatId, body, { replyMarkup: buildHelpMenu() }));
+      } else {
+        ctx.waitUntil(sendMessage(token, chatId, body, replyMarkup ? { replyMarkup } : undefined));
+      }
       return new Response("OK", { status: 200 });
     }
 
@@ -1081,8 +1222,16 @@ export default {
       : !text.startsWith("/") ? text : "";
     const tickerForButtons = tickerForButtonsRaw.includes(",") ? tickerForButtonsRaw.split(",")[0] : tickerForButtonsRaw;
     const replyMarkup = tickerForButtons ? buildInlineActions(normalizeTicker(tickerForButtons)) : undefined;
-    if (text === "/help" || text === "/start") ctx.waitUntil(sendMessage(token, chatId, reply, { replyMarkup: buildHelpMenu() }));
-    else ctx.waitUntil(sendMessage(token, chatId, reply, replyMarkup ? { replyMarkup } : undefined));
+    if (text.startsWith("/portfolio")) {
+      const preview = reply.split("\n").slice(0, 26).join("\n") + "\n\n（完整報告已輸出附件檔）";
+      ctx.waitUntil(sendMessage(token, chatId, preview, { replyMarkup: buildHelpMenu() }));
+      const filename = `portfolio_${new Date().toISOString().slice(0, 10)}.txt`;
+      ctx.waitUntil(sendDocument(token, chatId, { filename, content: reply, caption: "Portfolio report" }));
+    } else if (text === "/help" || text === "/start") {
+      ctx.waitUntil(sendMessage(token, chatId, reply, { replyMarkup: buildHelpMenu() }));
+    } else {
+      ctx.waitUntil(sendMessage(token, chatId, reply, replyMarkup ? { replyMarkup } : undefined));
+    }
     ctx.waitUntil(
       caches.default.put(cacheKey, new Response(reply, { headers: { "cache-control": "max-age=90" } })),
     );
