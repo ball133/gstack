@@ -409,6 +409,37 @@ async function fetchFredLastTwo(seriesId: string): Promise<{ latest: number; pre
   return { latest: values[0], prev: values.length > 1 ? values[1] : null };
 }
 
+async function fetchTreasuryYieldCurveLastTwo(year: number): Promise<{
+  asOfDate: string;
+  latest: { y2: number; y10: number; y30: number };
+  prev: { y2: number; y10: number; y30: number };
+} | null> {
+  const url =
+    `https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml?data=daily_treasury_yield_curve&field_tdr_date_value=${encodeURIComponent(String(year))}`;
+  const res = await fetch(url, { headers: { "user-agent": "Mozilla/5.0" } });
+  const xml = await res.text();
+
+  const pull = (tag: string) => {
+    const re = new RegExp(`<d:${tag}\\\\b[^>]*>([^<]*)</d:${tag}>`, "g");
+    const out: string[] = [];
+    for (const m of xml.matchAll(re)) out.push((m[1] || "").trim());
+    return out;
+  };
+
+  const dates = pull("NEW_DATE");
+  const y2s = pull("BC_2YEAR");
+  const y10s = pull("BC_10YEAR");
+  const y30s = pull("BC_30YEAR");
+  const n = Math.min(dates.length, y2s.length, y10s.length, y30s.length);
+  if (n < 2) return null;
+
+  const asOfDate = dates[n - 1];
+  const latest = { y2: Number(y2s[n - 1]), y10: Number(y10s[n - 1]), y30: Number(y30s[n - 1]) };
+  const prev = { y2: Number(y2s[n - 2]), y10: Number(y10s[n - 2]), y30: Number(y30s[n - 2]) };
+  if (![latest.y2, latest.y10, latest.y30, prev.y2, prev.y10, prev.y30].every((x) => Number.isFinite(x))) return null;
+  return { asOfDate, latest, prev };
+}
+
 function weeklyCloses(timestamps: number[], closes: number[]): number[] {
   const n = Math.min(timestamps.length, closes.length);
   const out: number[] = [];
@@ -552,9 +583,8 @@ async function formatMacroDashboard(): Promise<string> {
   const igOas = await fetchFredLatest("BAMLC0A0CM");
   const sofr = await fetchFredLatest("SOFR");
 
-  const us2y = await fetchFredLastTwo("DGS2");
-  const us10y = await fetchFredLastTwo("DGS10");
-  const us30y = await fetchFredLastTwo("DGS30");
+  const year = new Date().getUTCFullYear();
+  const yc = (await fetchTreasuryYieldCurveLastTwo(year)) || (await fetchTreasuryYieldCurveLastTwo(year - 1));
 
   const walcl = await fetchFredLatest("WALCL");
   const rrp = await fetchFredLatest("RRPONTSYD");
@@ -589,9 +619,18 @@ async function formatMacroDashboard(): Promise<string> {
   if (igOas != null) parts.push(`- IG OAS: ${igOas.toFixed(2)}% (${Math.round(igOas * 100)} bps)`);
   parts.push(`- DXY: ${(dxy.closes[dxy.closes.length - 1] || 0).toFixed(2)} (${fmtPct(chg(dxy))})`);
   const fmtBps = (d: number | null) => (d == null ? "Δ N/A" : `${d >= 0 ? "+" : ""}${d.toFixed(0)} bps`);
-  if (us2y) parts.push(`- US 2Y: ${us2y.latest.toFixed(2)}% (${fmtBps(us2y.prev != null ? (us2y.latest - us2y.prev) * 100 : null)})`);
-  if (us10y) parts.push(`- US 10Y: ${us10y.latest.toFixed(2)}% (${fmtBps(us10y.prev != null ? (us10y.latest - us10y.prev) * 100 : null)})`);
-  if (us30y) parts.push(`- US 30Y: ${us30y.latest.toFixed(2)}% (${fmtBps(us30y.prev != null ? (us30y.latest - us30y.prev) * 100 : null)})`);
+  if (yc) {
+    parts.push(`- US 2Y: ${yc.latest.y2.toFixed(2)}% (${fmtBps((yc.latest.y2 - yc.prev.y2) * 100)})`);
+    parts.push(`- US 10Y: ${yc.latest.y10.toFixed(2)}% (${fmtBps((yc.latest.y10 - yc.prev.y10) * 100)})`);
+    parts.push(`- US 30Y: ${yc.latest.y30.toFixed(2)}% (${fmtBps((yc.latest.y30 - yc.prev.y30) * 100)})`);
+  } else {
+    const us2y = await fetchFredLastTwo("DGS2");
+    const us10y = await fetchFredLastTwo("DGS10");
+    const us30y = await fetchFredLastTwo("DGS30");
+    if (us2y) parts.push(`- US 2Y: ${us2y.latest.toFixed(2)}% (${fmtBps(us2y.prev != null ? (us2y.latest - us2y.prev) * 100 : null)})`);
+    if (us10y) parts.push(`- US 10Y: ${us10y.latest.toFixed(2)}% (${fmtBps(us10y.prev != null ? (us10y.latest - us10y.prev) * 100 : null)})`);
+    if (us30y) parts.push(`- US 30Y: ${us30y.latest.toFixed(2)}% (${fmtBps(us30y.prev != null ? (us30y.latest - us30y.prev) * 100 : null)})`);
+  }
   parts.push("");
   parts.push("💧 **Liquidity Status**");
   if (netLiquidity != null) parts.push(`- Net liquidity: ${netLiquidity.toFixed(2)}B`);
