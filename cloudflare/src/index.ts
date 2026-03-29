@@ -1921,4 +1921,24 @@ export default {
 
     return new Response("OK", { status: 200 });
   },
+
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    const token = getToken(env);
+    if (!token) return;
+    const allowed = parseAllowedChatIds(env);
+    if (allowed.length === 0) return;
+
+    ctx.waitUntil(
+      (async () => {
+        for (const chatId of allowed) {
+          try {
+            const body = await handle(chatId, "/morning", env);
+            await sendMessage(token, chatId, body, { replyMarkup: buildHelpMenu() });
+          } catch {
+            // ignore
+          }
+        }
+      })(),
+    );
+  },
 };
