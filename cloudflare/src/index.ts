@@ -152,6 +152,7 @@ function buildHelpMenu() {
         { text: "7️⃣ 宏觀 (Macro)", callback_data: "M|MACRO" },
         { text: "8️⃣ 操作建議", callback_data: "M|ACTION" },
       ],
+      [{ text: "9️⃣ 早晨簡報", callback_data: "M|MORNING" }],
       [{ text: "🆔 /whoami 取得 Chat ID", callback_data: "M|WHOAMI" }],
       [{ text: "✖️ 取消/清除等待", callback_data: "M|CANCEL" }],
     ],
@@ -419,7 +420,33 @@ async function formatMacroDashboard(profile: { risk: RiskTolerance; horizon: Hor
   const liquidityStatus =
     netLiquidity != null && sofr != null && sofr < 6 ? "正常" : "偏緊";
 
+  const mood = sentimentFromVix(pVix);
+  const us10y = yc ? yc.latest.y10 : null;
+  const us10yChgBps = yc ? (yc.latest.y10 - yc.prev.y10) * 100 : null;
+  const morning = formatMorningLines({
+    isoDate: new Date().toISOString().slice(0, 10),
+    sentiment: mood.sentiment,
+    advice: mood.advice,
+    stance: mood.stance,
+    regime,
+    vix: pVix,
+    vixChgPct: chg(vix),
+    spx: pSpx,
+    spxChgPct: chg(spx),
+    dxy: pDxy,
+    dxyChgPct: chg(dxy),
+    hyOas,
+    us10y,
+    us10yChgBps,
+    btcSignal: signal,
+    btcPos: pos,
+    btcPrice,
+    btcScore: `${met}/7`,
+  });
+
   const parts: string[] = [];
+  parts.push(...morning);
+  parts.push("");
   parts.push("🌍 全球宏觀儀表板 (Macro)");
   parts.push("");
   parts.push("🧡 比特幣 (BTC) 分析");
@@ -476,6 +503,64 @@ async function formatMacroDashboard(profile: { risk: RiskTolerance; horizon: Hor
 function parseUnit(envValue: string | undefined, fallback: number): number {
   const n = envValue != null ? Number(String(envValue).trim()) : NaN;
   return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function sentimentFromVix(vix: number): { sentiment: "PANIC" | "FEAR" | "NORMAL"; advice: string; stance: "DEFENSIVE" | "CAUTIOUS" | "NEUTRAL" } {
+  if (vix >= 30) return { sentiment: "PANIC", advice: "恐慌偏高：避免追單/避免加槓桿，嚴控風險，等待波動回落。", stance: "DEFENSIVE" };
+  if (vix >= 20) return { sentiment: "FEAR", advice: "恐懼偏高：分批、控槓桿，優先持有高品質資產。", stance: "CAUTIOUS" };
+  return { sentiment: "NORMAL", advice: "情緒正常：按計畫執行，避免過度頻繁交易。", stance: "NEUTRAL" };
+}
+
+function formatMorningLines(params: {
+  isoDate: string;
+  sentiment: "PANIC" | "FEAR" | "NORMAL";
+  advice: string;
+  stance: "DEFENSIVE" | "CAUTIOUS" | "NEUTRAL";
+  regime: "RISK-OFF" | "RISK-ON";
+  vix: number;
+  vixChgPct: number;
+  spx: number;
+  spxChgPct: number;
+  dxy: number;
+  dxyChgPct: number;
+  hyOas: number | null;
+  us10y: number | null;
+  us10yChgBps: number | null;
+  btcSignal: string;
+  btcPos: string;
+  btcPrice: number;
+  btcScore: string;
+}): string[] {
+  const fmtBps = (d: number | null) => (d == null ? "Δ N/A" : `${d >= 0 ? "+" : ""}${d.toFixed(0)} bps`);
+  const triggers: string[] = [];
+  if (params.vix >= 30) triggers.push("VIX>30");
+  if (params.hyOas != null && params.hyOas >= 6.0) triggers.push("HY OAS>6%");
+  if (params.dxy >= 105) triggers.push("DXY>105");
+  if (params.us10yChgBps != null && params.us10yChgBps >= 10) triggers.push("10Y ↑(>=10bps)");
+
+  const expert =
+    params.regime === "RISK-OFF"
+      ? `目前偏風險趨避（VIX ${params.vix.toFixed(2)}）。若 VIX 持續高於 30，代表市場壓力偏大；BTC 訊號 ${params.btcSignal}（${params.btcScore}，建議倉位 ${params.btcPos}）與風險趨避不一致時，避免過度加槓桿。`
+      : `目前偏風險偏好（VIX ${params.vix.toFixed(2)}）。BTC 訊號 ${params.btcSignal}（${params.btcScore}，建議倉位 ${params.btcPos}），留意利率與信用利差是否同步改善。`;
+
+  const snapshot: string[] = [];
+  snapshot.push(`VIX ${params.vix.toFixed(2)} (${fmtPct(params.vixChgPct)}) | S&P 500 ${params.spx.toFixed(0)} (${fmtPct(params.spxChgPct)})`);
+  snapshot.push(`DXY ${params.dxy.toFixed(2)} (${fmtPct(params.dxyChgPct)})${params.hyOas != null ? ` | HY OAS ${params.hyOas.toFixed(2)}%` : ""}`);
+  if (params.us10y != null) snapshot.push(`US 10Y ${params.us10y.toFixed(2)}% (${fmtBps(params.us10yChgBps)})`);
+
+  return [
+    `🌅 早晨市場簡報 (Morning) — ${params.isoDate}`,
+    "",
+    `🧠 觀察重點: ${expert}`,
+    "",
+    `📉 市場情緒: ${params.sentiment}`,
+    `建議: ${params.advice}`,
+    "",
+    `🛡️ 投資組合立場: ${params.stance} | Regime: ${params.regime}`,
+    `觸發條件: ${triggers.length ? triggers.join(", ") : "無"}`,
+    "",
+    `📌 快照: ${snapshot.join(" | ")}`,
+  ];
 }
 
 async function formatActionPlan(env: Env, profile: { risk: RiskTolerance; horizon: Horizon }): Promise<string> {
@@ -1274,6 +1359,7 @@ async function handle(chatId: number, text: string, env: Env): Promise<string> {
       "- `/summary NVDA`（重點）",
       "- `/watch NVDA,AAPL,TSLA`（觀察清單掃描）",
       "- `/heatmap NVDA,AAPL,TSLA`（熱力圖）",
+      "- `/morning`（早晨簡報）",
       "- `/macro`（宏觀儀表板）",
       "- `/action`（今日操作建議）",
       "- `/marksix`（預設 30 期）",
@@ -1283,7 +1369,7 @@ async function handle(chatId: number, text: string, env: Env): Promise<string> {
       "- `/portfolio`（使用 Worker env：PORTFOLIO_POSITIONS 或 PORTFOLIO）",
       "- `/whoami`（取得你的 Chat ID，用於白名單）",
       "",
-      "快捷選單：直接回覆 1/2/3/4/5/6/7/8 也可以",
+      "快捷選單：直接回覆 1/2/3/4/5/6/7/8/9 也可以",
       "",
       "偏好設定（env vars）: RISK=low|medium|high, HORIZON=day|swing|invest",
       "投資組合（env vars）: PORTFOLIO_POSITIONS=NVDA:15@167.52,0700.HK:100@493.4 或 PORTFOLIO=NVDA,AAPL,0700.HK",
@@ -1293,6 +1379,77 @@ async function handle(chatId: number, text: string, env: Env): Promise<string> {
 
   if (cmd === "whoami") {
     return `你的 Chat ID: ${chatId}\n請把這串數字傳給 bot 管理員，讓他把你加入 TELEGRAM_ALLOWED_CHAT_IDS 白名單。`;
+  }
+
+  if (cmd === "morning") {
+    const btc = await fetchYahooChart("BTC-USD");
+    const btcPrice = btc.closes[btc.closes.length - 1] || 0;
+    const rsiD = rsi14(btc.closes);
+    const rsiW = rsi14(weeklyCloses(btc.timestamps, btc.closes));
+    const s30 = sharpe30d(btc.closes);
+    const d20 = sma(btc.closes, 20);
+    const d200 = sma(btc.closes, 200);
+    const atr = atr14(btc.highs, btc.lows, btc.closes);
+    const atrPct = btcPrice ? (atr / btcPrice) * 100 : 0;
+
+    const met = [
+      rsiD <= 40,
+      rsiW >= 45,
+      btcPrice >= d20,
+      btcPrice >= d200,
+      s30 > 0,
+      (() => {
+        const hi = Math.max(...btc.closes.slice(-60));
+        return hi ? btcPrice / hi - 1 > -0.2 : true;
+      })(),
+      atrPct < 6,
+    ].filter(Boolean).length;
+    const btcSignal = met >= 5 ? "買入" : met >= 4 ? "偏買" : met >= 3 ? "觀望" : "避險";
+    const btcPos = met >= 5 ? "5–10%" : met >= 4 ? "2–5%" : "0–2%";
+
+    const vix = await fetchYahooChart("^VIX");
+    const spx = await fetchYahooChart("^GSPC");
+    const dxy = await fetchYahooChart("DX-Y.NYB");
+    const pVix = vix.closes[vix.closes.length - 1] || 0;
+    const pSpx = spx.closes[spx.closes.length - 1] || 0;
+    const pDxy = dxy.closes[dxy.closes.length - 1] || 0;
+    const hyOas = await fetchFredLatest("BAMLH0A0HYM2");
+    const year = new Date().getUTCFullYear();
+    const yc = (await fetchTreasuryYieldCurveLastTwo(year)) || (await fetchTreasuryYieldCurveLastTwo(year - 1));
+    const us10y = yc ? yc.latest.y10 : null;
+    const us10yChgBps = yc ? (yc.latest.y10 - yc.prev.y10) * 100 : null;
+    const regime = pVix >= 20 || (hyOas != null && hyOas >= 4.0) ? "RISK-OFF" : "RISK-ON";
+    const mood = sentimentFromVix(pVix);
+
+    const chg = (series: ChartData) => {
+      const last = series.closes[series.closes.length - 1] || 0;
+      const prev = pickBack(series.closes, 1);
+      return computePctChange(last, prev);
+    };
+
+    const lines = formatMorningLines({
+      isoDate: new Date().toISOString().slice(0, 10),
+      sentiment: mood.sentiment,
+      advice: mood.advice,
+      stance: mood.stance,
+      regime,
+      vix: pVix,
+      vixChgPct: chg(vix),
+      spx: pSpx,
+      spxChgPct: chg(spx),
+      dxy: pDxy,
+      dxyChgPct: chg(dxy),
+      hyOas,
+      us10y,
+      us10yChgBps,
+      btcSignal,
+      btcPos,
+      btcPrice,
+      btcScore: `${met}/7`,
+    });
+    lines.push("");
+    lines.push(formatFooter(profile, Math.max(btc.asOfUnix || 0, vix.asOfUnix || 0, spx.asOfUnix || 0, dxy.asOfUnix || 0)));
+    return lines.join("\n");
   }
 
   if (cmd === "action") {
@@ -1617,13 +1774,20 @@ export default {
         ctx.waitUntil(sendMessage(token, chatId, body, { replyMarkup: buildHelpMenu() }));
         return new Response("OK", { status: 200 });
       }
+
+      if (sel === "MORNING") {
+        await setPending(chatId, null);
+        const body = await handle(chatId, "/morning", env);
+        ctx.waitUntil(sendMessage(token, chatId, body, { replyMarkup: buildHelpMenu() }));
+        return new Response("OK", { status: 200 });
+      }
     }
 
     const pending = await getPending(chatId);
     let text = decodeCallbackData(raw);
 
     const numeric = text.trim();
-    if (!numeric.startsWith("/") && /^[1-8]$/.test(numeric)) {
+    if (!numeric.startsWith("/") && /^[1-9]$/.test(numeric)) {
       const map: Record<string, string> = {
         "1": "M|FULL",
         "2": "M|SUMMARY",
@@ -1633,6 +1797,7 @@ export default {
         "6": "M|MARKSIX",
         "7": "M|MACRO",
         "8": "M|ACTION",
+        "9": "M|MORNING",
       };
       const cmd = map[numeric];
       if (cmd) {
@@ -1675,6 +1840,12 @@ export default {
         if (sel === "ACTION") {
           await setPending(chatId, null);
           const body = await handle(chatId, "/action", env);
+          ctx.waitUntil(sendMessage(token, chatId, body, { replyMarkup: buildHelpMenu() }));
+          return new Response("OK", { status: 200 });
+        }
+        if (sel === "MORNING") {
+          await setPending(chatId, null);
+          const body = await handle(chatId, "/morning", env);
           ctx.waitUntil(sendMessage(token, chatId, body, { replyMarkup: buildHelpMenu() }));
           return new Response("OK", { status: 200 });
         }
